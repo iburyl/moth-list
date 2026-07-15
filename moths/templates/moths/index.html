@@ -1,0 +1,69 @@
+{% extends "moths/base.html" %}
+
+{% block title %}Tax IDs — Moths List{% endblock %}
+
+{% block content %}
+    <p class="muted">{{ total }} tax_id{{ total|pluralize }} found in <code>{{ image_dir }}</code></p>
+    <p class="muted">Counts shown as <code>train + val + unlisted</code>.</p>
+
+    {% if rows %}
+        <style>
+            .tax-table {
+                border-collapse: collapse;
+                width: 100%;
+                font-size: 0.9rem;
+            }
+            .tax-table th, .tax-table td {
+                padding: 0.5rem 0.75rem;
+                border-bottom: 1px solid #8883;
+                text-align: right;
+                white-space: nowrap;
+            }
+            .tax-table th { color: #6b7280; font-weight: 600; text-align: right; }
+            .tax-table .tax-col { text-align: left; }
+            .tax-table .group-head { text-align: center; }
+            .tax-table tbody tr:hover { background: #8881; }
+            .tax-table td.num { font-variant-numeric: tabular-nums; }
+            .tax-table .zero { color: #9ca3af; }
+            .tax-table .triple { font-variant-numeric: tabular-nums; }
+            .tax-table .triple .part { font-weight: 600; text-decoration: none; }
+            .tax-table .triple .part:hover { text-decoration: underline; }
+            .tax-table .triple .part.zero { color: #9ca3af; font-weight: 400; }
+            .tax-table a { font-weight: 600; }
+            .col-group { border-left: 1px solid #8883; }
+        </style>
+        <table class="tax-table">
+            <thead>
+                <tr>
+                    <th class="tax-col" rowspan="2">tax_id</th>
+                    <th class="group-head col-group" colspan="{{ stages|length|add:1 }}">classes</th>
+                    <th class="group-head col-group" colspan="2">boxes</th>
+                </tr>
+                <tr>
+                    {% for stage in stages %}
+                        <th{% if forloop.first %} class="col-group"{% endif %}>{{ stage }}</th>
+                    {% endfor %}
+                    <th>none</th>
+                    <th class="col-group">labeled</th>
+                    <th>not labeled</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in rows %}
+                    <tr>
+                        <td class="tax-col"><a href="{% url 'moths:tax_detail' row.tax_id %}">{{ row.tax_id }}</a></td>
+                        {% for cell in row.stage_cells %}
+                            <td class="num{% if forloop.first %} col-group{% endif %}">{% include "moths/_count_cell.html" with cell=cell tax_id=row.tax_id qkey="stage" qval=cell.stage %}</td>
+                        {% endfor %}
+                        <td class="num">{% include "moths/_count_cell.html" with cell=row.unclassified tax_id=row.tax_id qkey="stage" qval="none" %}</td>
+                        <td class="num col-group">{% include "moths/_count_cell.html" with cell=row.labeled tax_id=row.tax_id qkey="labeled" qval="yes" %}</td>
+                        <td class="num">{% include "moths/_count_cell.html" with cell=row.not_labeled tax_id=row.tax_id qkey="labeled" qval="no" %}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p>No images found. Check that the image directory exists and contains
+        files named like <code>{tax_id}_observation_{obs_id}_photo_{photo_id}.jpg</code>.</p>
+    {% endif %}
+{% endblock %}
