@@ -1,0 +1,798 @@
+{% extends "moths/base.html" %}
+{% load moth_names %}
+
+{% block title %}{{ image.filename }} — Edit{% endblock %}
+
+{% block content %}
+    <h2 class="tax-heading"><a href="{% url 'moths:pose_view' image.tax_id %}{% if filter_qs %}?{{ filter_qs }}{% endif %}">{% tax_name image.tax_id %}</a></h2>
+    <div class="detail-header">
+        <div class="nav-bar" id="nav-bar"
+             data-prev="{% if prev_filename %}{% url 'moths:image_edit' prev_filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}{% endif %}"
+             data-next="{% if next_filename %}{% url 'moths:image_edit' next_filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}{% endif %}">
+            {% if prev_filename %}
+                <a class="nav-btn" href="{% url 'moths:image_edit' prev_filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}" title="Previous ([)" aria-label="Previous image">&larr;</a>
+            {% else %}
+                <span class="nav-btn disabled" aria-disabled="true">&larr;</span>
+            {% endif %}
+            <span class="nav-pos">{{ position }} of {{ total }}</span>
+            {% if next_filename %}
+                <a class="nav-btn" href="{% url 'moths:image_edit' next_filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}" title="Next (])" aria-label="Next image">&rarr;</a>
+            {% else %}
+                <span class="nav-btn disabled" aria-disabled="true">&rarr;</span>
+            {% endif %}
+        </div>
+    </div>
+
+    {% include "moths/_viewer_style.html" %}
+    <style>
+        .bbox {
+            position: absolute;
+            border: calc(2px / var(--s)) solid #ef4444;
+            border-radius: calc(2px / var(--s));
+        }
+        .bbox-label {
+            position: absolute; top: 0; left: 0;
+            transform: translateY(-100%) scale(calc(1 / var(--s)));
+            transform-origin: left bottom;
+            background: #ef4444; color: #fff;
+            font: 600 11px/1.4 system-ui, sans-serif;
+            padding: 0 4px; white-space: nowrap;
+        }
+        .bbox.selected { border-color: #2563eb; box-shadow: 0 0 0 calc(1px / var(--s)) #2563eb; }
+        .bbox.dim { opacity: 0.45; }
+        .kp.kp-selected {
+            box-shadow: 0 0 0 calc(2px / var(--s)) #2563eb,
+                        0 0 calc(4px / var(--s)) calc(2px / var(--s)) #2563eb99;
+        }
+
+        /* Read-only reference prediction overlay (from MOTHS_PREDICTION_DIR). */
+        .bbox-pred {
+            position: absolute;
+            border: calc(2px / var(--s)) dashed #06b6d4;
+            border-radius: calc(2px / var(--s));
+        }
+        .bbox-pred-label {
+            position: absolute; top: 0; left: 0;
+            transform: translateY(-100%) scale(calc(1 / var(--s)));
+            transform-origin: left bottom;
+            background: #06b6d4; color: #042f2e;
+            font: 600 11px/1.4 system-ui, sans-serif;
+            padding: 0 4px; white-space: nowrap;
+        }
+        .kp-pred {
+            position: absolute;
+            width: calc(10px / var(--s)); height: calc(10px / var(--s));
+            border: calc(2px / var(--s)) solid #06b6d4; background: transparent;
+            transform: translate(-50%, -50%) rotate(45deg);
+        }
+        .kp-pred-label {
+            position: absolute;
+            transform: translate(calc(6px / var(--s)), -50%) scale(calc(1 / var(--s)));
+            transform-origin: left center;
+            font: 600 11px/1 system-ui, sans-serif; color: #06b6d4;
+            text-shadow: 0 0 3px #000, 0 0 3px #000; white-space: nowrap;
+        }
+
+        .stage-picker { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+        .stage-option {
+            display: inline-flex; align-items: center; gap: 0.35rem;
+            padding: 0.3rem 0.6rem; border: 1px solid #8883; border-radius: 999px;
+            cursor: pointer; user-select: none; font-size: 0.85rem;
+        }
+        .stage-option:hover { border-color: #2563eb; }
+        .stage-option:has(input:checked) { background: #2563eb; border-color: #2563eb; color: #fff; }
+        .stage-option input { margin: 0; }
+        .stage-key {
+            font-size: 0.7rem; font-weight: 700; color: #6b7280;
+            border: 1px solid #8884; border-radius: 4px; padding: 0 0.25rem; line-height: 1.3;
+        }
+        .stage-option:has(input:checked) .stage-key { color: #fff; border-color: #ffffff88; }
+        .stage-clear {
+            padding: 0.3rem 0.6rem; border: 1px solid #8883; border-radius: 999px;
+            background: transparent; color: #ef4444; cursor: pointer; font-size: 0.85rem;
+        }
+        .stage-clear:hover { border-color: #ef4444; }
+        .stage-status { margin: 0.5rem 0 0; }
+
+        .flags-picker { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+        .flag-option {
+            display: inline-flex; align-items: center; gap: 0.35rem;
+            padding: 0.3rem 0.6rem; border: 1px solid #8883; border-radius: 999px;
+            cursor: pointer; user-select: none; font-size: 0.85rem;
+        }
+        .flag-option:hover { border-color: #2563eb; }
+        .flag-option:has(input:checked) { background: #2563eb; border-color: #2563eb; color: #fff; }
+        .flag-option input { margin: 0; }
+        .flags-status { margin: 0.5rem 0 0; }
+
+        .object-row {
+            display: flex; align-items: center; gap: 0.5rem;
+            padding: 0.35rem 0.5rem; border: 1px solid #8883; border-radius: 6px;
+            margin-bottom: 0.35rem; cursor: pointer;
+        }
+        .object-row:hover { border-color: #2563eb; }
+        .object-row.selected { border-color: #2563eb; background: #2563eb18; }
+        .object-row .obj-title { flex: 1; font-size: 0.85rem; }
+        .object-row .obj-kps { color: #6b7280; font-size: 0.75rem; }
+        .obj-delete {
+            border: none; background: transparent; color: #ef4444;
+            font-weight: 700; cursor: pointer; font-size: 1rem; line-height: 1;
+            padding: 0 0.25rem; border-radius: 4px;
+        }
+        .obj-delete:hover { background: #ef444422; }
+        .add-object {
+            display: inline-flex; align-items: center; gap: 0.4rem;
+            padding: 0.35rem 0.7rem; border: 1px dashed #8884; border-radius: 6px;
+            background: transparent; color: inherit; cursor: pointer; font-size: 0.85rem;
+        }
+        .add-object:hover { border-color: #2563eb; color: #2563eb; }
+        .edit-help { margin: 0.6rem 0 0; font-size: 0.8rem; }
+        .edit-help kbd {
+            border: 1px solid #8884; border-radius: 4px; padding: 0 0.3rem;
+            font: 600 0.75rem/1.4 ui-monospace, monospace;
+        }
+
+        .star-btn {
+            display: inline-flex; align-items: center; gap: 0.5rem;
+            font: inherit; font-size: 0.95rem; padding: 0.45rem 0.9rem;
+            border: 1px solid #8884; border-radius: 8px; background: #8881;
+            color: inherit; cursor: pointer;
+        }
+        .star-btn:hover { border-color: #f59e0b; }
+        .star-btn .star-icon { font-size: 1.2rem; line-height: 1; color: #9ca3af; }
+        .star-btn.starred { border-color: #f59e0b; background: #f59e0b1a; }
+        .star-btn.starred .star-icon { color: #f59e0b; }
+        .star-status { margin: 0.5rem 0 0; }
+    </style>
+
+    <div class="detail-layout">
+        <div class="viewer-col">
+            <div class="view-tabs">
+                <span class="view-tab active">Edit</span>
+                {% if norm_available %}
+                    <a class="view-tab" href="{% url 'moths:image_normalized' image.filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}">Normalized</a>
+                {% else %}
+                    <span class="view-tab disabled" title="No prediction keypoints">Normalized</span>
+                {% endif %}
+            </div>
+            <div class="viewer" id="viewer">
+                <div class="toolbar">
+                    <button type="button" id="zoom-in" title="Zoom in">+</button>
+                    <button type="button" id="zoom-out" title="Zoom out">&minus;</button>
+                    <button type="button" id="zoom-reset" title="Fit to view">&#10226;</button>
+                </div>
+                <div class="zoom-readout" id="zoom-readout">100%</div>
+                <div class="stage" id="stage">
+                    <img id="stage-img" src="{% url 'moths:serve_image' image.filename %}" alt="{{ image.filename }}">
+                    <div class="overlay" id="overlay"></div>
+                </div>
+            </div>
+        </div>
+
+        <aside class="side-panel">
+            <h3>Image</h3>
+            <p class="filename">{{ image.filename }}</p>
+            <ul class="meta-list">
+                <li><span>tax_id</span><span>{% tax_name image.tax_id %}</span></li>
+                <li><span>observation</span><span><a href="https://www.inaturalist.org/observations/{{ image.obs_id }}" target="_blank" rel="noopener">{{ image.obs_id }}</a></span></li>
+                <li><span>photo</span><span>{{ image.photo_id }}</span></li>
+                <li><span>label</span><span>{% if has_label %}<code>{{ label_name }}</code>{% else %}none{% endif %}</span></li>
+            </ul>
+
+            <h3>Observation</h3>
+            <div class="subsection">
+                <button type="button" id="star-btn"
+                        class="star-btn {% if starred %}starred{% endif %}"
+                        data-url="{% url 'moths:set_star' image.filename %}"
+                        data-csrf="{{ csrf_token }}"
+                        data-starred="{% if starred %}1{% else %}0{% endif %}"
+                        title="Shortcut: F">
+                    <span class="star-icon">{% if starred %}&#9733;{% else %}&#9734;{% endif %}</span>
+                    <span class="star-text">{% if starred %}Starred{% else %}Star{% endif %}</span>
+                </button>
+                <p class="star-status muted" id="star-status">
+                    {% if starred %}Shown first in the poses view.{% else %}Not starred.{% endif %}
+                </p>
+            </div>
+
+            <h3>Annotations</h3>
+
+            <div class="subsection">
+                <h4>Stage</h4>
+                <div class="stage-picker" id="stage-picker"
+                     data-url="{% url 'moths:set_stage' image.filename %}"
+                     data-csrf="{{ csrf_token }}">
+                    {% for s in stages %}
+                        <label class="stage-option" title="Shortcut: {{ forloop.counter }}">
+                            <input type="radio" name="stage" value="{{ s }}" {% if current_stage == s %}checked{% endif %}>
+                            <span class="stage-key">{{ forloop.counter }}</span>
+                            <span>{{ s }}</span>
+                        </label>
+                    {% endfor %}
+                    <button type="button" class="stage-clear" id="stage-clear">clear</button>
+                </div>
+                <p class="stage-status muted" id="stage-status">
+                    {% if current_stage %}Classified as {{ current_stage }}.{% else %}Not classified.{% endif %}
+                </p>
+            </div>
+
+            <div class="subsection">
+                <h4>Flags</h4>
+                <div class="flags-picker" id="flags-picker"
+                     data-url="{% url 'moths:set_flags' image.filename %}"
+                     data-csrf="{{ csrf_token }}">
+                    {% for fl in flags %}
+                        <label class="flag-option">
+                            <input type="checkbox" name="flag" value="{{ fl }}" {% if fl in current_flags %}checked{% endif %}>
+                            <span>{{ fl }}</span>
+                        </label>
+                    {% endfor %}
+                </div>
+                <p class="flags-status muted" id="flags-status">
+                    {% if current_flags %}{{ current_flags|join:", " }}.{% else %}No flags.{% endif %}
+                </p>
+            </div>
+
+            <div class="subsection" id="editor"
+                 data-url="{% url 'moths:save_label' image.filename %}"
+                 data-csrf="{{ csrf_token }}">
+                <h4>Objects</h4>
+                <div id="objects-list"></div>
+                <button type="button" class="add-object" id="add-object">
+                    + add object <span class="stage-key">+</span>
+                </button>
+                <p class="muted edit-help">
+                    Hover the image and press
+                    <kbd>W</kbd>=F, <kbd>A</kbd>=L, <kbd>S</kbd>=B, <kbd>D</kbd>=R
+                    to place a keypoint; press the same key again to remove it.
+                    The point you just placed is selected — <kbd>Q</kbd> toggles it
+                    between visible and partially visible.
+                    Saved automatically once F and B are present.
+                    Hold <kbd>Shift</kbd> and drag to draw a box-only object
+                    (no keypoints).
+                    {% if has_prediction %}
+                    <kbd>R</kbd> replaces all labels with the reference
+                    prediction (dropping any keypoints it doesn't have).
+                    {% endif %}
+                </p>
+                <p class="muted" id="edit-status"></p>
+            </div>
+
+            {{ objects_data|json_script:"objects-data" }}
+            {{ prediction_data|json_script:"prediction-data" }}
+            {{ keypoint_slots|json_script:"slot-labels" }}
+
+            <h3>Legend</h3>
+            <div class="legend">
+                <span class="row"><span class="swatch" style="background:#22c55e;"></span> keypoint visible (2)</span>
+                <span class="row"><span class="swatch" style="background:#f59e0b;"></span> keypoint occluded (1)</span>
+                <span class="row"><span class="swatch" style="background:#9ca3af;"></span> unlabeled (0, hidden)</span>
+                <span class="row"><span class="swatch" style="background:#ef4444; border-radius:2px;"></span> bounding box</span>
+                {% if has_prediction %}
+                <span class="row"><span class="swatch" style="background:transparent; border-color:#06b6d4;"></span> prediction (reference, read-only)</span>
+                {% endif %}
+            </div>
+        </aside>
+    </div>
+
+    {% include "moths/_viewer_js.html" %}
+
+    <script>
+        // --- Annotation editor -------------------------------------------
+        (function () {
+            var overlayEl = document.getElementById("overlay");
+            var editor = document.getElementById("editor");
+            var listEl = document.getElementById("objects-list");
+            var statusEl = document.getElementById("edit-status");
+            var saveUrl = editor.dataset.url;
+            var csrf = editor.dataset.csrf;
+            var SLOT_LABELS = JSON.parse(document.getElementById("slot-labels").textContent);
+            var KP_COLORS = { 0: "#9ca3af", 1: "#f59e0b", 2: "#22c55e" };
+            var KEY_TO_SLOT = { w: 0, a: 1, s: 3, d: 2 };  // F, L, B, R
+
+            var raw = JSON.parse(document.getElementById("objects-data").textContent);
+            var objects = raw.map(function (o) {
+                var kps = [];
+                var placed = 0;
+                for (var i = 0; i < 4; i++) {
+                    var k = (o.keypoints && o.keypoints[i]) || { x: 0, y: 0, v: 0 };
+                    kps.push({ x: k.x, y: k.y, v: k.v });
+                    if (k.v > 0) placed++;
+                }
+                return {
+                    classId: o.class_id || 0,
+                    box: { cx: o.cx, cy: o.cy, w: o.w, h: o.h },
+                    keypoints: kps,
+                    loaded: true,
+                    // A stored object with a box but no keypoints is box-only.
+                    boxOnly: placed === 0 && o.w > 0 && o.h > 0,
+                };
+            });
+
+            // Read-only reference predictions (drawn beneath editable objects).
+            var predictions = (JSON.parse(
+                document.getElementById("prediction-data").textContent
+            ) || []).map(function (o) {
+                var kps = [];
+                for (var i = 0; i < 4; i++) {
+                    var k = (o.keypoints && o.keypoints[i]) || { x: 0, y: 0, v: 0 };
+                    kps.push({ x: k.x, y: k.y, v: k.v });
+                }
+                return { classId: o.class_id || 0, box: { cx: o.cx, cy: o.cy, w: o.w, h: o.h }, keypoints: kps };
+            });
+
+            var selected = objects.length ? 0 : null;
+            var selectedKp = null;
+
+            function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+            function placedCount(obj) {
+                return obj.keypoints.filter(function (k) { return k.v > 0; }).length;
+            }
+            function savable(obj) {
+                return obj.keypoints[0].v > 0 && obj.keypoints[3].v > 0;
+            }
+            function computeBox(obj) {
+                var pts = obj.keypoints.filter(function (k) { return k.v > 0; });
+                if (!pts.length) return null;
+                var xs = pts.map(function (p) { return p.x; });
+                var ys = pts.map(function (p) { return p.y; });
+                var minx = Math.min.apply(null, xs), maxx = Math.max.apply(null, xs);
+                var miny = Math.min.apply(null, ys), maxy = Math.max.apply(null, ys);
+                return { cx: (minx + maxx) / 2, cy: (miny + maxy) / 2, w: maxx - minx, h: maxy - miny };
+            }
+            function boxFor(obj) { return obj.box || computeBox(obj); }
+
+            function renderPredictions() {
+                predictions.forEach(function (obj) {
+                    var box = obj.box;
+                    if (box && box.w > 0 && box.h > 0) {
+                        var d = document.createElement("div");
+                        d.className = "bbox-pred";
+                        d.style.left = (box.cx - box.w / 2) * 100 + "%";
+                        d.style.top = (box.cy - box.h / 2) * 100 + "%";
+                        d.style.width = box.w * 100 + "%";
+                        d.style.height = box.h * 100 + "%";
+                        var lbl = document.createElement("span");
+                        lbl.className = "bbox-pred-label";
+                        lbl.textContent = "pred " + obj.classId;
+                        d.appendChild(lbl);
+                        overlayEl.appendChild(d);
+                    }
+                    obj.keypoints.forEach(function (kp, slot) {
+                        if (kp.v <= 0) return;
+                        var dot = document.createElement("div");
+                        dot.className = "kp-pred";
+                        dot.style.left = kp.x * 100 + "%";
+                        dot.style.top = kp.y * 100 + "%";
+                        overlayEl.appendChild(dot);
+                        var t = document.createElement("div");
+                        t.className = "kp-pred-label";
+                        t.style.left = kp.x * 100 + "%";
+                        t.style.top = kp.y * 100 + "%";
+                        t.textContent = SLOT_LABELS[slot] || (slot + 1);
+                        overlayEl.appendChild(t);
+                    });
+                });
+            }
+
+            function renderOverlay() {
+                overlayEl.innerHTML = "";
+                renderPredictions();
+                objects.forEach(function (obj, i) {
+                    var box = boxFor(obj);
+                    if (box && (obj.boxOnly || savable(obj))) {
+                        var d = document.createElement("div");
+                        d.className = "bbox" + (i === selected ? " selected" : (selected !== null ? " dim" : ""));
+                        d.style.left = (box.cx - box.w / 2) * 100 + "%";
+                        d.style.top = (box.cy - box.h / 2) * 100 + "%";
+                        d.style.width = box.w * 100 + "%";
+                        d.style.height = box.h * 100 + "%";
+                        var lbl = document.createElement("span");
+                        lbl.className = "bbox-label";
+                        lbl.textContent = (obj.boxOnly ? "box " : "class ") + obj.classId;
+                        d.appendChild(lbl);
+                        overlayEl.appendChild(d);
+                    }
+                    obj.keypoints.forEach(function (kp, slot) {
+                        if (kp.v <= 0) return;
+                        var dot = document.createElement("div");
+                        dot.className = "kp" +
+                            (i === selected && slot === selectedKp ? " kp-selected" : "");
+                        dot.style.left = kp.x * 100 + "%";
+                        dot.style.top = kp.y * 100 + "%";
+                        dot.style.background = KP_COLORS[kp.v] || "#3b82f6";
+                        overlayEl.appendChild(dot);
+                        var t = document.createElement("div");
+                        t.className = "kp-label";
+                        t.style.left = kp.x * 100 + "%";
+                        t.style.top = kp.y * 100 + "%";
+                        t.textContent = SLOT_LABELS[slot] || (slot + 1);
+                        overlayEl.appendChild(t);
+                    });
+                });
+            }
+
+            function renderList() {
+                listEl.innerHTML = "";
+                if (!objects.length) {
+                    var p = document.createElement("p");
+                    p.className = "muted";
+                    p.textContent = "No objects yet.";
+                    listEl.appendChild(p);
+                    return;
+                }
+                objects.forEach(function (obj, i) {
+                    var row = document.createElement("div");
+                    row.className = "object-row" + (i === selected ? " selected" : "");
+                    var title = document.createElement("span");
+                    title.className = "obj-title";
+                    if (obj.boxOnly) {
+                        title.innerHTML = "Object " + (i + 1) +
+                            " <span class='obj-kps'>box (no keypoints)</span>";
+                    } else {
+                        var placed = obj.keypoints.map(function (k, s) {
+                            return k.v > 0 ? SLOT_LABELS[s] : "\u00b7";
+                        }).join(" ");
+                        title.innerHTML = "Object " + (i + 1) +
+                            " <span class='obj-kps'>" + placed + " (" + placedCount(obj) + "/4)</span>";
+                    }
+                    row.appendChild(title);
+                    var del = document.createElement("button");
+                    del.className = "obj-delete";
+                    del.type = "button";
+                    del.title = "Delete object";
+                    del.textContent = "\u00d7";
+                    del.addEventListener("click", function (e) { e.stopPropagation(); deleteObject(i); });
+                    row.appendChild(del);
+                    row.addEventListener("click", function () {
+                        selected = i; selectedKp = null; render();
+                    });
+                    listEl.appendChild(row);
+                });
+            }
+
+            function render() { renderOverlay(); renderList(); }
+
+            function save() {
+                var payload = { objects: [] };
+                objects.forEach(function (obj) {
+                    var box = boxFor(obj);
+                    if (obj.boxOnly) {
+                        if (!box || box.w <= 0 || box.h <= 0) return;
+                        payload.objects.push({
+                            class_id: obj.classId,
+                            cx: box.cx, cy: box.cy, w: box.w, h: box.h,
+                            keypoints: [],
+                        });
+                        return;
+                    }
+                    if (!savable(obj) || !box) return;
+                    payload.objects.push({
+                        class_id: obj.classId,
+                        cx: box.cx, cy: box.cy, w: box.w, h: box.h,
+                        keypoints: obj.keypoints.map(function (k) {
+                            return { x: k.x, y: k.y, v: k.v };
+                        }),
+                    });
+                });
+                statusEl.textContent = "Saving\u2026";
+                fetch(saveUrl, {
+                    method: "POST",
+                    headers: { "X-CSRFToken": csrf, "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                })
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        if (data.ok) {
+                            statusEl.textContent = "Saved " + data.count +
+                                " object" + (data.count === 1 ? "" : "s") + ".";
+                        } else {
+                            statusEl.textContent = "Error: " + (data.error || "save failed");
+                        }
+                    })
+                    .catch(function () { statusEl.textContent = "Save failed."; });
+            }
+
+            function deleteObject(i) {
+                objects.splice(i, 1);
+                if (selected === i) selected = objects.length ? Math.max(0, i - 1) : null;
+                else if (selected !== null && selected > i) selected--;
+                selectedKp = null;
+                render();
+                save();
+            }
+
+            function addObject() {
+                objects.push({
+                    classId: 0,
+                    box: null,
+                    keypoints: [
+                        { x: 0, y: 0, v: 0 }, { x: 0, y: 0, v: 0 },
+                        { x: 0, y: 0, v: 0 }, { x: 0, y: 0, v: 0 },
+                    ],
+                    loaded: false,
+                });
+                selected = objects.length - 1;
+                selectedKp = null;
+                render();
+                statusEl.textContent = "New object — place F/L/R/B with W/A/S/D over the image.";
+            }
+
+            document.getElementById("add-object").addEventListener("click", addObject);
+
+            document.addEventListener("keydown", function (e) {
+                if (e.metaKey || e.ctrlKey || e.altKey) return;
+                var tag = e.target && e.target.tagName;
+                if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+                if (e.key === "+") { addObject(); e.preventDefault(); return; }
+
+                var key = e.key.toLowerCase();
+
+                if (key === "q") {
+                    if (selected !== null && selectedKp !== null) {
+                        var sel = objects[selected].keypoints[selectedKp];
+                        if (sel.v > 0) {
+                            sel.v = sel.v === 2 ? 1 : 2;
+                            render();
+                            save();
+                        }
+                    }
+                    e.preventDefault();
+                    return;
+                }
+
+                // 'r' replaces all labels with the reference prediction(s):
+                // keypoints are copied from the prediction, and any not present
+                // there are dropped.
+                if (key === "r") {
+                    e.preventDefault();
+                    if (predictions.length) {
+                        objects = predictions.map(function (p) {
+                            return {
+                                classId: p.classId,
+                                box: null,
+                                keypoints: p.keypoints.map(function (k) {
+                                    return { x: k.x, y: k.y, v: k.v };
+                                }),
+                                loaded: false,
+                            };
+                        });
+                        selected = 0;
+                        selectedKp = null;
+                        render();
+                        save();
+                        statusEl.textContent = "Replaced label with prediction.";
+                    }
+                    return;
+                }
+
+                var slot = KEY_TO_SLOT[key];
+                if (slot === undefined) return;
+                e.preventDefault();
+
+                var obj = selected !== null ? objects[selected] : null;
+                var kp = obj ? obj.keypoints[slot] : null;
+
+                if (kp && kp.v > 0) {
+                    obj.keypoints[slot] = { x: 0, y: 0, v: 0 };
+                    if (selectedKp === slot) selectedKp = null;
+                    obj.box = null;
+                    render();
+                    save();
+                    return;
+                }
+
+                var V = window.Viewer;
+                if (!V || !V.pointer.inside) return;
+                var n = V.clientToNorm(V.pointer.x, V.pointer.y);
+                if (!n) return;
+                // Start keypoints on a fresh object when nothing is selected or
+                // the current one is a box-only object (keep that box intact).
+                if (obj === null || obj.boxOnly) { addObject(); obj = objects[selected]; }
+                obj.keypoints[slot] = { x: clamp01(n.x), y: clamp01(n.y), v: 2 };
+                selectedKp = slot;
+                obj.box = null;
+                render();
+                save();
+            });
+
+            // Shift + click-drag over the image draws a box-only object (no
+            // keypoints); it is saved as "class cx cy w h" to the label file.
+            if (window.Viewer && window.Viewer.setShiftDragHandler) {
+                var boxFromCorners = function (x0, y0, x1, y1) {
+                    var minx = Math.min(x0, x1), maxx = Math.max(x0, x1);
+                    var miny = Math.min(y0, y1), maxy = Math.max(y0, y1);
+                    return {
+                        cx: (minx + maxx) / 2, cy: (miny + maxy) / 2,
+                        w: maxx - minx, h: maxy - miny,
+                    };
+                };
+                var drag = null;
+                window.Viewer.setShiftDragHandler({
+                    start: function (n) {
+                        if (!n) return;
+                        var x = clamp01(n.x), y = clamp01(n.y);
+                        objects.push({
+                            classId: 0,
+                            box: { cx: x, cy: y, w: 0, h: 0 },
+                            keypoints: [
+                                { x: 0, y: 0, v: 0 }, { x: 0, y: 0, v: 0 },
+                                { x: 0, y: 0, v: 0 }, { x: 0, y: 0, v: 0 },
+                            ],
+                            loaded: false,
+                            boxOnly: true,
+                        });
+                        drag = { i: objects.length - 1, x0: x, y0: y };
+                        selected = drag.i; selectedKp = null;
+                        render();
+                        statusEl.textContent = "Drawing box\u2026";
+                    },
+                    move: function (n) {
+                        if (!drag || !n) return;
+                        objects[drag.i].box =
+                            boxFromCorners(drag.x0, drag.y0, clamp01(n.x), clamp01(n.y));
+                        render();
+                    },
+                    end: function (n) {
+                        if (!drag) return;
+                        var i = drag.i, obj = objects[i];
+                        if (n) obj.box =
+                            boxFromCorners(drag.x0, drag.y0, clamp01(n.x), clamp01(n.y));
+                        drag = null;
+                        if (!obj.box || obj.box.w < 0.005 || obj.box.h < 0.005) {
+                            objects.splice(i, 1);
+                            selected = objects.length ? Math.min(i, objects.length - 1) : null;
+                            render();
+                            statusEl.textContent = "Box too small \u2014 discarded.";
+                            return;
+                        }
+                        render();
+                        save();
+                    },
+                });
+            }
+
+            render();
+            document.addEventListener("viewer:load", renderOverlay);
+        })();
+
+        // Stage classification: persist radio changes / clear via POST.
+        (function () {
+            var picker = document.getElementById("stage-picker");
+            if (!picker) return;
+            var url = picker.dataset.url;
+            var csrf = picker.dataset.csrf;
+            var status = document.getElementById("stage-status");
+            var radios = picker.querySelectorAll('input[name="stage"]');
+
+            function save(stage) {
+                var body = new URLSearchParams();
+                if (stage) body.append("stage", stage);
+                status.textContent = "Saving\u2026";
+                fetch(url, {
+                    method: "POST",
+                    headers: {
+                        "X-CSRFToken": csrf,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                    body: body.toString(),
+                })
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        if (data.error) { status.textContent = "Error: " + data.error; return; }
+                        status.textContent = data.stage
+                            ? "Classified as " + data.stage + "."
+                            : "Not classified.";
+                    })
+                    .catch(function () { status.textContent = "Save failed."; });
+            }
+
+            radios.forEach(function (r) {
+                r.addEventListener("change", function () {
+                    if (r.checked) { save(r.value); r.blur(); }
+                });
+            });
+            document.getElementById("stage-clear").addEventListener("click", function () {
+                radios.forEach(function (r) { r.checked = false; });
+                save("");
+            });
+
+            // Number keys 1..4 select the matching stage.
+            document.addEventListener("keydown", function (e) {
+                if (e.metaKey || e.ctrlKey || e.altKey) return;
+                var tag = e.target && e.target.tagName;
+                if (tag === "TEXTAREA" || (tag === "INPUT" && e.target.type !== "radio")) return;
+                var idx = "1234".indexOf(e.key);
+                if (idx === -1 || idx >= radios.length) return;
+                var r = radios[idx];
+                r.checked = true;
+                save(r.value);
+                r.blur();
+                e.preventDefault();
+            });
+        })();
+
+        // Optional flags (Pinned/Macro/Damaged): persist checkbox changes.
+        (function () {
+            var picker = document.getElementById("flags-picker");
+            if (!picker) return;
+            var url = picker.dataset.url;
+            var csrf = picker.dataset.csrf;
+            var status = document.getElementById("flags-status");
+            var boxes = picker.querySelectorAll('input[name="flag"]');
+
+            function save() {
+                var flags = [];
+                boxes.forEach(function (b) { if (b.checked) flags.push(b.value); });
+                status.textContent = "Saving\u2026";
+                fetch(url, {
+                    method: "POST",
+                    headers: { "X-CSRFToken": csrf, "Content-Type": "application/json" },
+                    body: JSON.stringify({ flags: flags }),
+                })
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        if (data.error) { status.textContent = "Error: " + data.error; return; }
+                        status.textContent = (data.flags && data.flags.length)
+                            ? data.flags.join(", ") + "."
+                            : "No flags.";
+                    })
+                    .catch(function () { status.textContent = "Save failed."; });
+            }
+
+            boxes.forEach(function (b) { b.addEventListener("change", save); });
+        })();
+
+        // Star / unstar the observation.
+        (function () {
+            var btn = document.getElementById("star-btn");
+            if (!btn) return;
+            var url = btn.dataset.url;
+            var csrf = btn.dataset.csrf;
+            var status = document.getElementById("star-status");
+            var icon = btn.querySelector(".star-icon");
+            var text = btn.querySelector(".star-text");
+
+            function apply(starred) {
+                btn.dataset.starred = starred ? "1" : "0";
+                btn.classList.toggle("starred", starred);
+                icon.innerHTML = starred ? "\u2605" : "\u2606";
+                text.textContent = starred ? "Starred" : "Star";
+                status.textContent = starred
+                    ? "Shown first in the poses view."
+                    : "Not starred.";
+            }
+
+            function toggle() {
+                var next = btn.dataset.starred !== "1";
+                status.textContent = "Saving\u2026";
+                var body = new URLSearchParams();
+                body.append("starred", next ? "1" : "0");
+                fetch(url, {
+                    method: "POST",
+                    headers: {
+                        "X-CSRFToken": csrf,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                    body: body.toString(),
+                })
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        if (data.error) { status.textContent = "Error: " + data.error; return; }
+                        apply(!!data.starred);
+                    })
+                    .catch(function () { status.textContent = "Save failed."; });
+            }
+
+            btn.addEventListener("click", toggle);
+
+            // 'f' toggles the star (unless typing in a field).
+            document.addEventListener("keydown", function (e) {
+                if (e.metaKey || e.ctrlKey || e.altKey) return;
+                var tag = e.target && e.target.tagName;
+                if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+                if (e.key.toLowerCase() === "f") { toggle(); e.preventDefault(); }
+            });
+        })();
+    </script>
+{% endblock %}

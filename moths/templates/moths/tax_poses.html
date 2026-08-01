@@ -1,0 +1,247 @@
+{% extends "moths/base.html" %}
+{% load moth_names %}
+
+{% block title %}{% tax_species tax_id %} — Moths List{% endblock %}
+
+{% block content %}
+    <h2 style="margin-top:0;">{% tax_name tax_id %}</h2>
+    <p class="muted">
+        {{ total }} image{{ total|pluralize }} grouped by stage and pose
+        {% if is_filtered %}
+            of {{ total_all }} · filtered by <strong>{{ filter_desc }}</strong>
+            · <a href="{% url 'moths:pose_view' tax_id %}">show all</a>
+        {% endif %}
+    </p>
+
+    {% if has_images %}
+    <form method="post"
+          action="{% url 'moths:rebuild_poses' tax_id %}{% if filter_qs %}?{{ filter_qs }}{% endif %}"
+          style="margin: 0 0 1rem;"
+          onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Rebuilding…';">
+        {% csrf_token %}
+        <button type="submit" class="rebuild-btn" title="Recompute pose classes and scores for this tax_id">
+            Rebuild pose index
+        </button>
+    </form>
+    {% endif %}
+
+    <style>
+        .rebuild-btn {
+            font: inherit; font-size: 0.85rem; padding: 0.35rem 0.8rem;
+            border: 1px solid #8884; border-radius: 6px; background: #8881;
+            color: inherit; cursor: pointer;
+        }
+        .rebuild-btn:hover:not(:disabled) { background: #8883; border-color: #2563eb; }
+        .rebuild-btn:disabled { opacity: 0.6; cursor: default; }
+        .pose-group { margin: 1.5rem 0; }
+        .pose-group h3 {
+            display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.5rem;
+            border-bottom: 1px solid #8883; padding-bottom: 0.35rem;
+        }
+        .pose-group h3 .count { color: #6b7280; font-weight: 400; font-size: 0.9rem; }
+        .group-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-left: auto; }
+        .bulk-btn {
+            padding: 0.3rem 0.7rem; border: 1px solid #8883; border-radius: 6px;
+            color: #fff; cursor: pointer; font-size: 0.8rem; font-weight: 400;
+        }
+        .bulk-btn:disabled { opacity: 0.6; cursor: default; }
+        .bulk-stage { background: #16a34a; }
+        .image-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 1rem; list-style: none; padding: 0; margin: 0;
+        }
+        .image-grid figure {
+            margin: 0; border: 1px solid #8883; border-radius: 8px; overflow: hidden;
+            position: relative;
+        }
+        /* Pose came from a model prediction (not a hand label). */
+        .image-grid figure.from-prediction { border: 2px solid #2563eb; }
+        .image-grid a { position: relative; display: block; }
+        .star-overlay {
+            position: absolute; top: 6px; left: 6px; z-index: 1;
+            font-size: 1.1rem; line-height: 1; color: #f59e0b;
+            text-shadow: 0 0 3px #000, 0 0 3px #000; pointer-events: none;
+        }
+        .image-grid img {
+            width: 100%; height: 170px; object-fit: cover; display: block; background: #8881;
+        }
+        .image-grid figcaption {
+            padding: 0.4rem 0.6rem; font-size: 0.78rem; color: #6b7280; word-break: break-all;
+        }
+        .status-rebuild { color: #f59e0b; font-weight: 600; }
+        .status-pred { color: #2563eb; font-weight: 600; }
+        .scaled { color: #9ca3af; }
+        .sort-bar { display: flex; gap: 0.5rem; margin: 0.6rem 0; }
+        .sort-bar button {
+            font: inherit; font-size: 0.8rem; padding: 0.25rem 0.6rem;
+            border: 1px solid #8884; border-radius: 6px; background: #8881;
+            color: inherit; cursor: pointer;
+        }
+        .sort-bar button:hover { background: #8883; }
+        .sort-bar button.active { background: #2563eb; border-color: #2563eb; color: #fff; }
+    </style>
+
+    {% if not groups %}
+        <p class="muted">
+            {% if has_images %}No images match this filter.{% else %}No data.{% endif %}
+        </p>
+    {% endif %}
+
+    {% for group in groups %}
+        <section class="pose-group">
+            <h3>
+                {{ group.label }} <span class="count">{{ group.rows|length }}</span>
+                {% if group.is_unknown %}
+                    <span class="group-actions">
+                        {% if group.is_unknown %}
+                            <button type="button" class="bulk-btn bulk-stage"
+                                    data-url="{% url 'moths:add_to_stage' tax_id 'Larva' %}{% if filter_qs %}?{{ filter_qs }}{% endif %}"
+                                    data-csrf="{{ csrf_token }}"
+                                    data-count="{{ group.rows|length }}"
+                                    data-label="Larva">
+                                Add {{ group.rows|length }} to Larvae
+                            </button>
+                            <button type="button" class="bulk-btn bulk-stage"
+                                    data-url="{% url 'moths:add_to_stage' tax_id 'Adult' %}{% if filter_qs %}?{{ filter_qs }}{% endif %}"
+                                    data-csrf="{{ csrf_token }}"
+                                    data-count="{{ group.rows|length }}"
+                                    data-label="Adult">
+                                Add {{ group.rows|length }} to Adult
+                            </button>
+                        {% endif %}
+                    </span>
+                {% endif %}
+            </h3>
+
+            {% if group.has_keypoints %}
+                <div class="sort-bar">
+                    <button type="button" data-sort="name" data-dir="asc">sort by name</button>
+                    <button type="button" data-sort="symmetry" data-dir="asc">sort by symmetry</button>
+                    <button type="button" data-sort="pixels" data-dir="desc">sort by pixels</button>
+                    {% if group.is_top_down %}
+                        <button type="button" data-sort="sharpness" data-dir="desc">sort by sharpness</button>
+                        <button type="button" data-sort="score" data-dir="desc" class="active">sort by score</button>
+                    {% endif %}
+                </div>
+            {% endif %}
+
+            <ul class="image-grid">
+                {% for row in group.rows %}
+                    <li data-name="{{ row.image.filename }}"
+                        data-starred="{% if row.starred %}1{% else %}0{% endif %}"
+                        data-symmetry="{% if row.metric is not None %}{{ row.metric }}{% endif %}"
+                        data-pixels="{% if row.pixel_span is not None %}{{ row.pixel_span }}{% endif %}"
+                        data-sharpness="{% if row.sharpness is not None %}{{ row.sharpness }}{% endif %}"
+                        data-score="{% if row.score is not None %}{{ row.score }}{% endif %}">
+                        <figure{% if row.from_prediction %} class="from-prediction"{% endif %}>
+                            {% if row.has_keypoints %}
+                                <a href="{% url 'moths:image_normalized' row.image.filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}">
+                            {% else %}
+                                <a href="{% url 'moths:image_edit' row.image.filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}">
+                            {% endif %}
+                                {% if row.starred %}<span class="star-overlay" title="Starred">&#9733;</span>{% endif %}
+                                {% if row.is_norm %}
+                                    <img src="{% url 'moths:serve_norm_thumbnail' row.image.filename %}" alt="{{ row.image.filename }}" loading="lazy">
+                                {% else %}
+                                    <img src="{% url 'moths:serve_thumbnail' row.image.filename %}" alt="{{ row.image.filename }}" loading="lazy">
+                                {% endif %}
+                            </a>
+                            <figcaption>
+                                {% if row.has_keypoints %}
+                                    {% if row.needs_rebuild %}
+                                        symmetry: &mdash;<br>
+                                        pixels: &mdash;
+                                        {% if row.is_top_down %}<br>sharpness: &mdash;<br>score: &mdash;{% endif %}
+                                        <br><span class="status-rebuild">to be rebuild</span>
+                                    {% else %}
+                                        symmetry: {% if row.metric is not None %}{{ row.metric|floatformat:4 }} <span class="scaled">({{ row.sym_score|floatformat:3 }})</span>{% else %}&mdash;{% endif %}<br>
+                                        pixels: {% if row.pixel_span is not None %}{{ row.pixel_span|floatformat:0 }} <span class="scaled">({{ row.pixel_score|floatformat:3 }})</span>{% else %}&mdash;{% endif %}
+                                        {% if row.sharpness is not None %}<br>sharpness: {{ row.sharpness_m|floatformat:3 }}M <span class="scaled">({{ row.sharp_score|floatformat:3 }})</span>{% endif %}
+                                        {% if row.score is not None %}<br>score: {{ row.score|floatformat:3 }}{% endif %}
+                                        {% if row.from_prediction %}<br><span class="status-pred">from prediction</span>{% endif %}
+                                    {% endif %}
+                                {% else %}
+                                    obs {{ row.image.obs_id }} · photo {{ row.image.photo_id }}
+                                {% endif %}
+                            </figcaption>
+                        </figure>
+                    </li>
+                {% endfor %}
+            </ul>
+        </section>
+    {% endfor %}
+
+    <span id="bulk-status" class="muted"></span>
+
+    <script>
+        (function () {
+            function sortGrid(grid, key, dir) {
+                var items = Array.prototype.slice.call(grid.children);
+                var numeric = key !== "name";
+                items.sort(function (a, b) {
+                    // Starred items always come first, regardless of sort key.
+                    var as = a.dataset.starred === "1", bs = b.dataset.starred === "1";
+                    if (as !== bs) return as ? -1 : 1;
+                    var av = a.dataset[key], bv = b.dataset[key];
+                    if (numeric) {
+                        var an = av === "" ? NaN : parseFloat(av);
+                        var bn = bv === "" ? NaN : parseFloat(bv);
+                        // Missing values always sort to the end.
+                        var aMissing = isNaN(an), bMissing = isNaN(bn);
+                        if (aMissing || bMissing) {
+                            return aMissing === bMissing ? 0 : (aMissing ? 1 : -1);
+                        }
+                        return dir === "asc" ? an - bn : bn - an;
+                    }
+                    var cmp = av.localeCompare(bv, undefined, { numeric: true });
+                    return dir === "asc" ? cmp : -cmp;
+                });
+                items.forEach(function (item) { grid.appendChild(item); });
+            }
+
+            document.querySelectorAll(".sort-bar").forEach(function (bar) {
+                var grid = bar.nextElementSibling;
+                bar.querySelectorAll("button").forEach(function (btn) {
+                    btn.addEventListener("click", function () {
+                        sortGrid(grid, btn.dataset.sort, btn.dataset.dir);
+                        bar.querySelectorAll("button").forEach(function (b) {
+                            b.classList.remove("active");
+                        });
+                        btn.classList.add("active");
+                    });
+                });
+            });
+
+            var buttons = document.querySelectorAll(".bulk-btn");
+            var status = document.getElementById("bulk-status");
+            buttons.forEach(function (btn) {
+                btn.addEventListener("click", function () {
+                    var n = btn.dataset.count;
+                    var label = btn.dataset.label;
+                    if (!window.confirm("Apply \u201c" + label + "\u201d to " + n + " image(s)?")) return;
+                    buttons.forEach(function (b) { b.disabled = true; });
+                    status.textContent = "Saving\u2026";
+                    fetch(btn.dataset.url, {
+                        method: "POST",
+                        headers: { "X-CSRFToken": btn.dataset.csrf },
+                    })
+                        .then(function (r) { return r.json(); })
+                        .then(function (data) {
+                            if (data.ok) {
+                                status.textContent = "Applied \u201c" + label + "\u201d to " + data.count + ". Reloading\u2026";
+                                window.location.reload();
+                            } else {
+                                status.textContent = "Error: " + (data.error || "failed");
+                                buttons.forEach(function (b) { b.disabled = false; });
+                            }
+                        })
+                        .catch(function () {
+                            status.textContent = "Failed.";
+                            buttons.forEach(function (b) { b.disabled = false; });
+                        });
+                });
+            });
+        })();
+    </script>
+{% endblock %}

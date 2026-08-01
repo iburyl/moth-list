@@ -1,1 +1,5 @@
-{% if cell.total %}<span class="triple"><a class="part{% if not cell.train %} zero{% endif %}" href="{% url 'moths:tax_detail' tax_id %}?{{ qkey }}={{ qval|urlencode }}&amp;subset=train" title="{{ qval }} · train">{{ cell.train }}</a>+<a class="part{% if not cell.val %} zero{% endif %}" href="{% url 'moths:tax_detail' tax_id %}?{{ qkey }}={{ qval|urlencode }}&amp;subset=val" title="{{ qval }} · val">{{ cell.val }}</a>+<a class="part{% if not cell.none %} zero{% endif %}" href="{% url 'moths:tax_detail' tax_id %}?{{ qkey }}={{ qval|urlencode }}&amp;subset=none" title="{{ qval }} · unlisted">{{ cell.none }}</a></span>{% else %}<span class="zero">0</span>{% endif %}
+{% comment %}
+Partial for one index-table count cell: a single total that links to the
+filtered poses view. Expects `count`, `tax_id`, `qkey` and `qval` from the
+includer. A zero renders dimmed with no link.
+{% endcomment %}{% if count %}<a class="part" href="{% url 'moths:pose_view' tax_id %}?{{ qkey }}={{ qval|urlencode }}" title="{{ qval }}">{{ count }}</a>{% else %}<span class="zero">0</span>{% endif %}

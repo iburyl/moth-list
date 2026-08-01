@@ -8,6 +8,8 @@ https://docs.djangoproject.com/en/5.1/topics/settings/
 import os
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
+
 # Build paths inside the project like this: BASE_DIR / "subdir".
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -118,24 +120,51 @@ STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 
-# Directory that holds the moth training images. Override with the
-# MOTHS_IMAGE_DIR env var if the folder lives elsewhere.
-MOTHS_IMAGE_DIR = os.environ.get(
-    "MOTHS_IMAGE_DIR",
-    r"C:\Photos\moths\moth_labels\data\images",
-)
+# --- Moth dataset locations --------------------------------------------------
+# Every path below must be provided explicitly via environment variables; there
+# are no built-in defaults. A minimal, sufficient set is::
+#
+#     set TAX_CSV=...\names.csv
+#     set MOTHS_CLASS_DIR=...\classes
+#     set MOTHS_IMAGE_DIR=...\images
+#     set MOTHS_PREDICTION_DIR=...\test
+#     set MOTHS_LABEL_DIR=...\labels
+#     set MOTHS_THUMBNAIL_DIR=...\cache
 
-# Directory where generated thumbnails are cached (created on demand).
-MOTHS_THUMBNAIL_DIR = os.environ.get(
-    "MOTHS_THUMBNAIL_DIR",
-    r"C:\Photos\moths\image_cache",
-)
+
+def _required_env(name: str) -> str:
+    """Return an environment variable's value or fail with a clear message."""
+    value = os.environ.get(name)
+    if not value:
+        raise ImproperlyConfigured(
+            f"Environment variable {name} must be set "
+            f"(the moth dataset paths have no built-in defaults)."
+        )
+    return value
+
+
+# Directory that holds the moth training images (per-tax_id subfolders).
+MOTHS_IMAGE_DIR = _required_env("MOTHS_IMAGE_DIR")
+
+# Directory holding the YOLO-pose label files (``<name>.txt``). These editable
+# hand labels are also the source used for pose classification.
+MOTHS_LABEL_DIR = _required_env("MOTHS_LABEL_DIR")
+
+# Directory holding read-only model prediction files (YOLO-pose format,
+# ``<name>.txt``). Shown as a reference overlay in the image edit view and
+# never modified through the app.
+MOTHS_PREDICTION_DIR = _required_env("MOTHS_PREDICTION_DIR")
+
+# Directory where generated thumbnails / normalized crops are cached.
+MOTHS_THUMBNAIL_DIR = _required_env("MOTHS_THUMBNAIL_DIR")
+
+# Directory holding per-image stage classification files (``<name>.class``).
+MOTHS_CLASS_DIR = _required_env("MOTHS_CLASS_DIR")
+
+# CSV mapping tax_id -> taxonomy names. Relevant columns: id, family, species,
+# name. Used to display friendly species labels (with a "{name} ({id})" title)
+# wherever a tax_id appears.
+MOTHS_NAMES_CSV = _required_env("TAX_CSV")
 
 # Max thumbnail size (width, height) in pixels; aspect ratio is preserved.
 MOTHS_THUMBNAIL_SIZE = (400, 400)
-
-# Directory holding per-image stage classification files (``<name>.class``).
-MOTHS_CLASS_DIR = os.environ.get(
-    "MOTHS_CLASS_DIR",
-    r"C:\Photos\moths\moth_labels\data\classes",
-)

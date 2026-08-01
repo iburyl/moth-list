@@ -1,0 +1,169 @@
+{% comment %}
+Shared zoom/pan/navigation logic for the image viewer. Exposes a small API on
+``window.Viewer`` and dispatches a ``viewer:load`` event on ``document`` whenever
+the stage image is (re)fitted. Pages register their overlay renderer via that
+event, e.g.::
+
+    document.addEventListener("viewer:load", renderOverlay);
+    if (window.Viewer && window.Viewer.ready) renderOverlay();
+
+API:
+    Viewer.overlay        -> the #overlay element to draw markers into
+    Viewer.pointer        -> { x, y, inside } latest pointer position (client px)
+    Viewer.clientToNorm(cx, cy) -> { x, y } normalized image coords (may be <0 or >1)
+    Viewer.refit()        -> re-fit the image to the viewer
+    Viewer.setShiftDragHandler(h) -> route Shift+drag to h.start/move/end(norm)
+                                     (norm = clientToNorm result) instead of panning
+    Viewer.ready          -> true once the image has loaded and been fitted
+{% endcomment %}
+<script>
+    (function () {
+        var viewer = document.getElementById("viewer");
+        var stage = document.getElementById("stage");
+        var img = document.getElementById("stage-img");
+        var readout = document.getElementById("zoom-readout");
+        var overlayEl = document.getElementById("overlay");
+
+        var MIN = 1, MAX = 8;
+        var scale = 1, tx = 0, ty = 0;
+        var fitScale = 1;
+        var iw = 0, ih = 0;
+        var dragging = false, lastX = 0, lastY = 0, moved = false;
+        var ready = false;
+        var pointer = { x: 0, y: 0, inside: false };
+        // Optional shift+drag handler (e.g. box drawing). When set, holding
+        // Shift on pointerdown routes the drag to it instead of panning.
+        var shiftDragHandler = null;
+        var boxMode = false;
+
+        function apply() {
+            stage.style.transform = "translate(" + tx + "px," + ty + "px) scale(" + scale + ")";
+            stage.style.setProperty("--s", scale);
+            readout.textContent = Math.round((scale / fitScale) * 100) + "%";
+        }
+        function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+        function fit() {
+            var vw = viewer.clientWidth, vh = viewer.clientHeight;
+            iw = img.naturalWidth || stage.offsetWidth;
+            ih = img.naturalHeight || stage.offsetHeight;
+            if (!iw || !ih) return;
+            stage.style.width = iw + "px";
+            stage.style.height = ih + "px";
+            fitScale = Math.min(vw / iw, vh / ih);
+            scale = fitScale;
+            tx = (vw - iw * scale) / 2;
+            ty = (vh - ih * scale) / 2;
+            apply();
+        }
+
+        function zoomAt(px, py, factor) {
+            var newScale = clamp(scale * factor, fitScale * MIN, fitScale * MAX);
+            if (newScale === scale) return;
+            var sx = (px - tx) / scale;
+            var sy = (py - ty) / scale;
+            scale = newScale;
+            tx = px - sx * scale;
+            ty = py - sy * scale;
+            apply();
+        }
+        function centerZoom(factor) {
+            zoomAt(viewer.clientWidth / 2, viewer.clientHeight / 2, factor);
+        }
+
+        document.getElementById("zoom-in").addEventListener("click", function () { centerZoom(1.25); });
+        document.getElementById("zoom-out").addEventListener("click", function () { centerZoom(1 / 1.25); });
+        document.getElementById("zoom-reset").addEventListener("click", fit);
+
+        viewer.addEventListener("wheel", function (e) {
+            e.preventDefault();
+            var rect = viewer.getBoundingClientRect();
+            zoomAt(e.clientX - rect.left, e.clientY - rect.top, e.deltaY < 0 ? 1.15 : 1 / 1.15);
+        }, { passive: false });
+
+        viewer.addEventListener("pointerdown", function (e) {
+            if (e.shiftKey && shiftDragHandler) {
+                boxMode = true;
+                viewer.setPointerCapture(e.pointerId);
+                shiftDragHandler.start(clientToNorm(e.clientX, e.clientY));
+                e.preventDefault();
+                return;
+            }
+            dragging = true; moved = false;
+            lastX = e.clientX; lastY = e.clientY;
+            viewer.classList.add("dragging");
+            viewer.setPointerCapture(e.pointerId);
+        });
+        viewer.addEventListener("pointermove", function (e) {
+            pointer.x = e.clientX; pointer.y = e.clientY; pointer.inside = true;
+            if (boxMode) { shiftDragHandler.move(clientToNorm(e.clientX, e.clientY)); return; }
+            if (!dragging) return;
+            var dx = e.clientX - lastX, dy = e.clientY - lastY;
+            if (Math.abs(dx) + Math.abs(dy) > 2) moved = true;
+            tx += dx; ty += dy;
+            lastX = e.clientX; lastY = e.clientY;
+            apply();
+        });
+        viewer.addEventListener("pointerleave", function () { pointer.inside = false; });
+
+        function clientToNorm(cx, cy) {
+            if (!iw || !ih) return null;
+            var rect = viewer.getBoundingClientRect();
+            var nx = (cx - rect.left - tx) / scale / iw;
+            var ny = (cy - rect.top - ty) / scale / ih;
+            return { x: nx, y: ny };
+        }
+        function endDrag(e) {
+            if (boxMode) {
+                boxMode = false;
+                if (shiftDragHandler) shiftDragHandler.end(clientToNorm(e.clientX, e.clientY));
+                try { viewer.releasePointerCapture(e.pointerId); } catch (err) {}
+                return;
+            }
+            if (!dragging) return;
+            dragging = false;
+            viewer.classList.remove("dragging");
+            try { viewer.releasePointerCapture(e.pointerId); } catch (err) {}
+        }
+        viewer.addEventListener("pointerup", endDrag);
+        viewer.addEventListener("pointercancel", endDrag);
+
+        viewer.addEventListener("dblclick", function (e) {
+            var rect = viewer.getBoundingClientRect();
+            if (scale > fitScale * 1.01) { fit(); }
+            else { zoomAt(e.clientX - rect.left, e.clientY - rect.top, 2); }
+        });
+
+        window.addEventListener("resize", fit);
+
+        // '[' and ']' navigate to the previous/next image (same view type).
+        var navBar = document.getElementById("nav-bar");
+        document.addEventListener("keydown", function (e) {
+            if (e.metaKey || e.ctrlKey || e.altKey) return;
+            var tag = e.target && e.target.tagName;
+            if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+            if (e.key === "[" && navBar && navBar.dataset.prev) {
+                window.location.href = navBar.dataset.prev;
+            } else if (e.key === "]" && navBar && navBar.dataset.next) {
+                window.location.href = navBar.dataset.next;
+            }
+        });
+
+        function onImageLoad() {
+            fit();
+            ready = true;
+            document.dispatchEvent(new Event("viewer:load"));
+        }
+        img.addEventListener("load", onImageLoad);
+        if (img.complete && img.naturalWidth) { onImageLoad(); }
+
+        window.Viewer = {
+            overlay: overlayEl,
+            pointer: pointer,
+            clientToNorm: clientToNorm,
+            refit: fit,
+            setShiftDragHandler: function (h) { shiftDragHandler = h; },
+            get ready() { return ready; },
+        };
+    })();
+</script>

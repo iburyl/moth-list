@@ -1,0 +1,256 @@
+{% extends "moths/base.html" %}
+{% load moth_names %}
+
+{% block title %}{{ image.filename }} — Normalized{% endblock %}
+
+{% block content %}
+    <h2 class="tax-heading"><a href="{% url 'moths:pose_view' image.tax_id %}{% if filter_qs %}?{{ filter_qs }}{% endif %}">{% tax_name image.tax_id %}</a></h2>
+    <div class="detail-header">
+        <div class="nav-bar" id="nav-bar"
+             data-prev="{% if prev_filename %}{% url 'moths:image_normalized' prev_filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}{% endif %}"
+             data-next="{% if next_filename %}{% url 'moths:image_normalized' next_filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}{% endif %}">
+            {% if prev_filename %}
+                <a class="nav-btn" href="{% url 'moths:image_normalized' prev_filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}" title="Previous ([)" aria-label="Previous image">&larr;</a>
+            {% else %}
+                <span class="nav-btn disabled" aria-disabled="true">&larr;</span>
+            {% endif %}
+            <span class="nav-pos">{{ position }} of {{ total }}</span>
+            {% if next_filename %}
+                <a class="nav-btn" href="{% url 'moths:image_normalized' next_filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}" title="Next (])" aria-label="Next image">&rarr;</a>
+            {% else %}
+                <span class="nav-btn disabled" aria-disabled="true">&rarr;</span>
+            {% endif %}
+        </div>
+    </div>
+
+    {% include "moths/_viewer_style.html" %}
+    <style>
+        /* Reference circle (diameter 80% of the square crop) that should pass
+           through the farthest keypoint when normalization is correct. */
+        .norm-circle {
+            position: absolute; left: 10%; top: 10%; width: 80%; height: 80%;
+            box-sizing: border-box; border-radius: 50%;
+            border: calc(2px / var(--s)) solid #ffffff80;
+            background: transparent;
+        }
+        /* L reflected across the F→B axis (ideal position of R). */
+        .kp-mirror {
+            position: absolute;
+            width: calc(11px / var(--s)); height: calc(11px / var(--s));
+            border: calc(2px / var(--s)) solid #ec4899; background: transparent;
+            transform: translate(-50%, -50%) rotate(45deg);
+        }
+        .kp-mirror-label {
+            position: absolute;
+            transform: translate(calc(7px / var(--s)), -50%) scale(calc(1 / var(--s)));
+            transform-origin: left center;
+            font: 600 11px/1 system-ui, sans-serif; color: #ec4899;
+            text-shadow: 0 0 3px #000, 0 0 3px #000; white-space: nowrap;
+        }
+        .star-btn {
+            display: inline-flex; align-items: center; gap: 0.5rem;
+            font: inherit; font-size: 0.95rem; padding: 0.45rem 0.9rem;
+            border: 1px solid #8884; border-radius: 8px; background: #8881;
+            color: inherit; cursor: pointer;
+        }
+        .star-btn:hover { border-color: #f59e0b; }
+        .star-btn .star-icon { font-size: 1.2rem; line-height: 1; color: #9ca3af; }
+        .star-btn.starred { border-color: #f59e0b; background: #f59e0b1a; }
+        .star-btn.starred .star-icon { color: #f59e0b; }
+        .star-status { margin: 0.5rem 0 0; }
+        .license-bad { color: #ef4444; font-weight: 600; }
+        .research-ok { color: #16a34a; font-weight: 600; }
+        .scaled { color: #9ca3af; }
+    </style>
+
+    <div class="detail-layout">
+        <div class="viewer-col">
+            <div class="view-tabs">
+                <a class="view-tab" href="{% url 'moths:image_edit' image.filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}">Edit</a>
+                <span class="view-tab active">Normalized</span>
+            </div>
+            <div class="viewer" id="viewer">
+                <div class="toolbar">
+                    <button type="button" id="zoom-in" title="Zoom in">+</button>
+                    <button type="button" id="zoom-out" title="Zoom out">&minus;</button>
+                    <button type="button" id="zoom-reset" title="Fit to view">&#10226;</button>
+                </div>
+                <div class="zoom-readout" id="zoom-readout">100%</div>
+                <div class="stage" id="stage">
+                    <img id="stage-img" src="{% url 'moths:serve_norm_image' image.filename %}" alt="{{ image.filename }}">
+                    <div class="overlay" id="overlay"></div>
+                </div>
+            </div>
+        </div>
+
+        <aside class="side-panel">
+            <h3>Image</h3>
+            <p class="filename">{{ image.filename }}</p>
+            <ul class="meta-list">
+                <li><span>tax_id</span><span>{% tax_name image.tax_id %}</span></li>
+                <li><span>observation</span><span><a href="https://www.inaturalist.org/observations/{{ image.obs_id }}" target="_blank" rel="noopener">{{ image.obs_id }}</a></span></li>
+                <li><span>photo</span><span>{{ image.photo_id }}</span></li>
+                <li><span>license</span><span class="{% if not license_is_cc %}license-bad{% endif %}">{{ license_code|default:"none" }}</span></li>
+                <li><span>quality</span><span class="{% if is_research %}research-ok{% endif %}">{% if is_research %}&#10004; {% endif %}{{ quality_grade|default:"—" }}</span></li>
+            </ul>
+
+            <h3>Observation</h3>
+            <div class="subsection">
+                <button type="button" id="star-btn"
+                        class="star-btn {% if starred %}starred{% endif %}"
+                        data-url="{% url 'moths:set_star' image.filename %}"
+                        data-csrf="{{ csrf_token }}"
+                        data-starred="{% if starred %}1{% else %}0{% endif %}"
+                        title="Shortcut: F">
+                    <span class="star-icon">{% if starred %}&#9733;{% else %}&#9734;{% endif %}</span>
+                    <span class="star-text">{% if starred %}Starred{% else %}Star{% endif %}</span>
+                </button>
+                <p class="star-status muted" id="star-status">
+                    {% if starred %}Shown first in the poses view.{% else %}Not starred.{% endif %}
+                </p>
+            </div>
+
+            {% if metrics %}
+            <h3>Metrics</h3>
+            <ul class="meta-list">
+                <li><span>symmetry</span><span>{% if metrics.symmetry is not None %}{{ metrics.symmetry|floatformat:4 }} <span class="scaled">({{ metrics.sym_score|floatformat:3 }})</span>{% else %}&mdash;{% endif %}</span></li>
+                <li><span>pixels</span><span>{% if metrics.pixel_span is not None %}{{ metrics.pixel_span|floatformat:0 }} <span class="scaled">({{ metrics.pixel_score|floatformat:3 }})</span>{% else %}&mdash;{% endif %}</span></li>
+                <li><span>sharpness</span><span>{% if metrics.sharpness is not None %}{{ metrics.sharpness_m|floatformat:3 }}M <span class="scaled">({{ metrics.sharp_score|floatformat:3 }})</span>{% else %}&mdash;{% endif %}</span></li>
+                <li><span>score</span><span>{% if metrics.score is not None %}{{ metrics.score|floatformat:3 }}{% else %}&mdash;{% endif %}</span></li>
+            </ul>
+            {% endif %}
+
+            {{ norm_keypoints|json_script:"norm-kps" }}
+
+            <h3>Legend</h3>
+            <div class="legend">
+                <span class="row"><span class="swatch" style="background:#22c55e;"></span> keypoint visible (2)</span>
+                <span class="row"><span class="swatch" style="background:#f59e0b;"></span> keypoint occluded (1)</span>
+                <span class="row"><span class="swatch" style="background:#9ca3af;"></span> unlabeled (0, hidden)</span>
+                <span class="row"><span class="swatch" style="background:transparent;border-color:#ec4899;"></span> L&#8242; = L mirrored (ideal R)</span>
+            </div>
+        </aside>
+    </div>
+
+    {% include "moths/_viewer_js.html" %}
+
+    <script>
+        // --- Normalized (read-only) overlay ------------------------------
+        (function () {
+            var overlayEl = document.getElementById("overlay");
+            var normKps = JSON.parse(document.getElementById("norm-kps").textContent) || [];
+
+            function findKp(label) {
+                return normKps.find(function (k) {
+                    return k.label === label && k.x !== null && k.y !== null;
+                });
+            }
+
+            // L reflected across the F→B axis. If the pose is perfectly
+            // symmetric this lands exactly on R; the gap to R is the symmetry
+            // metric (as a fraction of the crop radius).
+            function mirroredLeft() {
+                var f = findKp("F"), l = findKp("L"), b = findKp("B");
+                if (!f || !l || !b) return null;
+                var dx = b.x - f.x, dy = b.y - f.y;
+                var denom = dx * dx + dy * dy;
+                if (denom === 0) return null;
+                var t = ((l.x - f.x) * dx + (l.y - f.y) * dy) / denom;
+                var px = f.x + t * dx, py = f.y + t * dy;
+                return { x: 2 * px - l.x, y: 2 * py - l.y };
+            }
+
+            function renderOverlay() {
+                overlayEl.innerHTML = "";
+                var circle = document.createElement("div");
+                circle.className = "norm-circle";
+                overlayEl.appendChild(circle);
+                normKps.forEach(function (kp) {
+                    if (kp.v <= 0 || kp.x === null || kp.y === null) return;
+                    var dot = document.createElement("div");
+                    dot.className = "kp";
+                    dot.style.left = kp.x * 100 + "%";
+                    dot.style.top = kp.y * 100 + "%";
+                    dot.style.background = kp.color || "#3b82f6";
+                    overlayEl.appendChild(dot);
+                    var t = document.createElement("div");
+                    t.className = "kp-label";
+                    t.style.left = kp.x * 100 + "%";
+                    t.style.top = kp.y * 100 + "%";
+                    t.textContent = kp.label;
+                    overlayEl.appendChild(t);
+                });
+
+                var mir = mirroredLeft();
+                if (mir) {
+                    var dot = document.createElement("div");
+                    dot.className = "kp-mirror";
+                    dot.style.left = mir.x * 100 + "%";
+                    dot.style.top = mir.y * 100 + "%";
+                    overlayEl.appendChild(dot);
+                    var t = document.createElement("div");
+                    t.className = "kp-mirror-label";
+                    t.style.left = mir.x * 100 + "%";
+                    t.style.top = mir.y * 100 + "%";
+                    t.textContent = "L\u2032";
+                    overlayEl.appendChild(t);
+                }
+            }
+
+            document.addEventListener("viewer:load", renderOverlay);
+            if (window.Viewer && window.Viewer.ready) renderOverlay();
+        })();
+
+        // --- Star / unstar the observation -------------------------------
+        (function () {
+            var btn = document.getElementById("star-btn");
+            if (!btn) return;
+            var url = btn.dataset.url;
+            var csrf = btn.dataset.csrf;
+            var status = document.getElementById("star-status");
+            var icon = btn.querySelector(".star-icon");
+            var text = btn.querySelector(".star-text");
+
+            function apply(starred) {
+                btn.dataset.starred = starred ? "1" : "0";
+                btn.classList.toggle("starred", starred);
+                icon.innerHTML = starred ? "\u2605" : "\u2606";
+                text.textContent = starred ? "Starred" : "Star";
+                status.textContent = starred
+                    ? "Shown first in the poses view."
+                    : "Not starred.";
+            }
+
+            function toggle() {
+                var next = btn.dataset.starred !== "1";
+                status.textContent = "Saving\u2026";
+                var body = new URLSearchParams();
+                body.append("starred", next ? "1" : "0");
+                fetch(url, {
+                    method: "POST",
+                    headers: {
+                        "X-CSRFToken": csrf,
+                        "Content-Type": "application/x-www-form-urlencoded",
+                    },
+                    body: body.toString(),
+                })
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        if (data.error) { status.textContent = "Error: " + data.error; return; }
+                        apply(!!data.starred);
+                    })
+                    .catch(function () { status.textContent = "Save failed."; });
+            }
+
+            btn.addEventListener("click", toggle);
+
+            // 'f' toggles the star (unless typing in a field).
+            document.addEventListener("keydown", function (e) {
+                if (e.metaKey || e.ctrlKey || e.altKey) return;
+                var tag = e.target && e.target.tagName;
+                if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+                if (e.key.toLowerCase() === "f") { toggle(); e.preventDefault(); }
+            });
+        })();
+    </script>
+{% endblock %}

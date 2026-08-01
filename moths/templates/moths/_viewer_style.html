@@ -1,0 +1,95 @@
+{% comment %}
+Shared styles for the image edit / normalized viewer pages: page header with
+tabs + navigation, the zoom/pan viewer stage, keypoint markers, and the common
+side-panel chrome. Page-specific rules (editor controls, reference circle, star
+button) live in the individual templates.
+{% endcomment %}
+<style>
+    .detail-header {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 1rem; flex-wrap: wrap; margin-bottom: 0.5rem;
+    }
+    .detail-header .back { margin-bottom: 0; }
+    .nav-bar { display: inline-flex; align-items: center; gap: 0.5rem; }
+    .nav-pos { font-size: 0.9rem; color: #6b7280; min-width: 4.5rem; text-align: center; }
+    .nav-btn {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 32px; height: 32px; border-radius: 6px;
+        border: 1px solid #8883; font-size: 16px; text-decoration: none;
+    }
+    .nav-btn:hover { border-color: #2563eb; text-decoration: none; }
+    .nav-btn.disabled { color: #9ca3af; border-style: dashed; cursor: default; }
+
+    .detail-layout {
+        display: flex; gap: 1.25rem; align-items: flex-start; flex-wrap: wrap;
+    }
+    .viewer-col { flex: 1 1 480px; min-width: 320px; }
+    .side-panel { flex: 0 0 320px; max-width: 100%; font-size: 0.9rem; }
+
+    .viewer {
+        position: relative;
+        height: calc(100vh - 160px); min-height: 360px;
+        background: #0b0b0d; border: 1px solid #8883; border-radius: 8px;
+        overflow: hidden; touch-action: none; cursor: grab;
+    }
+    .viewer.dragging { cursor: grabbing; }
+
+    /* --s is the current stage scale; markers divide by it so they keep a
+       constant on-screen size regardless of zoom. */
+    .stage {
+        position: absolute; top: 0; left: 0; --s: 1;
+        transform-origin: 0 0; will-change: transform; line-height: 0;
+    }
+    .stage img { display: block; user-select: none; -webkit-user-drag: none; }
+    .overlay { position: absolute; inset: 0; pointer-events: none; }
+
+    .kp {
+        position: absolute;
+        width: calc(11px / var(--s)); height: calc(11px / var(--s));
+        border-radius: 50%; border: calc(2px / var(--s)) solid #fff;
+        transform: translate(-50%, -50%);
+    }
+    .kp-label {
+        position: absolute;
+        transform: translate(calc(6px / var(--s)), -50%) scale(calc(1 / var(--s)));
+        transform-origin: left center;
+        font: 600 11px/1 system-ui, sans-serif; color: #fff;
+        text-shadow: 0 0 3px #000, 0 0 3px #000; white-space: nowrap;
+    }
+
+    .toolbar {
+        position: absolute; top: 8px; left: 8px; z-index: 2;
+        display: flex; gap: 4px;
+        background: #000000aa; backdrop-filter: blur(4px);
+        padding: 4px; border-radius: 8px;
+    }
+    .toolbar button {
+        width: 32px; height: 32px; border: none; border-radius: 6px;
+        background: #ffffff1a; color: #fff; font-size: 16px; cursor: pointer;
+        line-height: 1; display: inline-flex; align-items: center; justify-content: center;
+    }
+    .toolbar button:hover { background: #ffffff33; }
+    .zoom-readout {
+        position: absolute; bottom: 8px; right: 8px; z-index: 2;
+        background: #000000aa; color: #fff;
+        font: 600 12px/1 system-ui, sans-serif;
+        padding: 5px 8px; border-radius: 6px;
+    }
+
+    .side-panel h3 {
+        font-size: 0.95rem; margin: 0 0 0.5rem;
+        border-bottom: 1px solid #8883; padding-bottom: 0.35rem;
+    }
+    .side-panel .filename { word-break: break-all; font-weight: 600; }
+    .meta-list { list-style: none; padding: 0; margin: 0 0 1.25rem; }
+    .meta-list li { display: flex; justify-content: space-between; gap: 1rem; padding: 0.15rem 0; }
+    .meta-list li span:first-child { color: #6b7280; }
+    .legend { display: flex; flex-direction: column; gap: 0.4rem; margin: 0 0 1.25rem; color: #6b7280; }
+    .legend span.row { display: inline-flex; align-items: center; gap: 0.5rem; }
+    .swatch { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px #0008; flex: 0 0 auto; }
+    .subsection { margin-bottom: 1rem; }
+    .subsection h4 {
+        font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em;
+        color: #6b7280; margin: 0 0 0.5rem;
+    }
+</style>

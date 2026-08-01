@@ -1,0 +1,468 @@
+{% extends "moths/base.html" %}
+
+{% block title %}Observation lookup — Moths List{% endblock %}
+
+{% block content %}
+    <style>
+        .obs-input { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; max-width: 720px; }
+        .obs-input input {
+            flex: 1; font: inherit; padding: 0.5rem 0.7rem;
+            border: 1px solid #8884; border-radius: 6px; background: transparent; color: inherit;
+        }
+        .obs-input button {
+            font: inherit; padding: 0.5rem 1rem; border: 1px solid #2563eb;
+            border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer;
+        }
+        .obs-input button:disabled { opacity: 0.6; cursor: default; }
+        #obs-status { margin: 0 0 0.75rem; min-height: 1.2em; }
+
+        .obs-layout { display: flex; gap: 1.25rem; align-items: flex-start; flex-wrap: wrap; }
+        .obs-main { flex: 1 1 480px; min-width: 320px; display: flex; gap: 1rem; }
+        .obs-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+        .obs-col h4 {
+            font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em;
+            color: #6b7280; margin: 0 0 0.5rem; min-height: 1.1em;
+        }
+        .obs-square {
+            position: relative; width: 100%; aspect-ratio: 1 / 1; max-height: 60vh;
+            border: 1px solid #8883; border-radius: 8px; background: #8881;
+            display: flex; align-items: center; justify-content: center;
+            overflow: hidden; touch-action: none;
+        }
+        .obs-square a {
+            width: 100%; height: 100%; display: flex;
+            align-items: center; justify-content: center;
+        }
+        .obs-square img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+
+        /* Interactive observation viewer (zoom / pan / rotate). */
+        #obs-img { user-select: none; cursor: grab; transition: transform 0.05s linear; }
+        #obs-img.dragging { cursor: grabbing; transition: none; }
+        .obs-toolbar {
+            position: absolute; left: 50%; transform: translateX(-50%); bottom: 8px; z-index: 2;
+            display: flex; align-items: center; gap: 6px; max-width: calc(100% - 16px);
+            background: rgba(0,0,0,0.5); padding: 4px 8px; border-radius: 6px;
+        }
+        .tb-buttons { display: flex; gap: 4px; }
+        .obs-toolbar button {
+            width: 28px; height: 28px; border: 1px solid #8886; border-radius: 4px;
+            background: rgba(0,0,0,0.4); color: #fff; cursor: pointer;
+            font-size: 15px; line-height: 1; padding: 0;
+        }
+        .obs-toolbar button:hover { background: rgba(0,0,0,0.8); }
+        .tb-rotate { display: flex; align-items: center; gap: 8px; width: 240px; }
+        .tb-rotate[hidden] { display: none; }
+        .tb-rotate input[type=range] { flex: 1; min-width: 0; accent-color: #2563eb; }
+        .tb-rotate .rot-val { color: #fff; font-size: 12px; min-width: 42px; text-align: right; }
+        .obs-empty { display: none; margin: 0; }
+        .obs-square.empty .obs-toolbar,
+        .obs-square.empty #obs-img { display: none; }
+        .obs-square.empty .obs-empty { display: block; }
+
+        .ruler-link {
+            margin-top: 1.25rem; border-top: 1px solid #8883; padding-top: 0.9rem;
+        }
+        .ruler-link a {
+            display: inline-block; font: inherit; padding: 0.4rem 0.9rem;
+            border: 1px solid #2563eb; border-radius: 6px; color: #2563eb;
+            text-decoration: none; font-weight: 600;
+        }
+        .ruler-link a:hover { background: #2563eb; color: #fff; }
+        .ruler-link .hint { color: #6b7280; font-size: 0.85rem; margin: 0.5rem 0 0; }
+        .obs-strip { display: flex; gap: 0.4rem; overflow-x: auto; padding: 0.5rem 0; min-height: 0.5rem; }
+        .obs-strip img {
+            height: 76px; width: 76px; object-fit: cover; border-radius: 4px;
+            border: 1px solid #8883; cursor: pointer; flex: 0 0 auto;
+        }
+        .obs-strip img.active { border-color: #2563eb; box-shadow: 0 0 0 2px #2563eb66; }
+
+        .side-panel { flex: 0 0 300px; max-width: 100%; font-size: 0.9rem; }
+        .side-panel h3 {
+            font-size: 0.95rem; margin: 0 0 0.5rem;
+            border-bottom: 1px solid #8883; padding-bottom: 0.35rem;
+        }
+        .meta-list { list-style: none; padding: 0; margin: 0; }
+        .meta-list li { display: flex; justify-content: space-between; gap: 1rem; padding: 0.15rem 0; }
+        .meta-list li span:first-child { color: #6b7280; }
+        .meta-list li .val { text-align: right; word-break: break-word; }
+        .license-bad { color: #ef4444; font-weight: 600; }
+        .research-ok { color: #16a34a; font-weight: 600; }
+    </style>
+
+    <div id="obs-root" data-species-url="{% url 'moths:species_info' 'TAXID' %}">
+        <div class="obs-input">
+            <input type="text" id="obs-url" autofocus
+                   placeholder="https://www.inaturalist.org/observations/43">
+            <button type="button" id="obs-load">Load</button>
+        </div>
+        <p id="obs-status" class="muted"></p>
+
+        <div class="obs-layout">
+            <div class="obs-main">
+                <div class="obs-col">
+                    <h4>Observation photos</h4>
+                    <div class="obs-square empty" id="obs-square">
+                        <img id="obs-img" alt="" draggable="false">
+                        <div class="obs-toolbar">
+                            <div class="tb-buttons" id="tb-buttons">
+                                <button type="button" data-act="zoomout" title="Zoom out">&minus;</button>
+                                <button type="button" data-act="zoomin" title="Zoom in">+</button>
+                                <button type="button" data-act="rotate" title="Rotate">&#8635;</button>
+                                <button type="button" data-act="reset" title="Reset view">&#10021;</button>
+                            </div>
+                            <div class="tb-rotate" id="tb-rotate" hidden>
+                                <input type="range" id="obs-rot" min="-180" max="180" step="0.5" value="0"
+                                       title="Rotate (arbitrary)">
+                                <span class="rot-val" id="obs-rot-val">0&deg;</span>
+                            </div>
+                        </div>
+                        <p class="obs-empty muted">No photos.</p>
+                    </div>
+                    <div class="obs-strip" id="obs-strip"></div>
+                </div>
+                <div class="obs-col">
+                    <h4 id="ref-heading">Reference image</h4>
+                    <div class="obs-square" id="ref-square"></div>
+                    <div class="obs-strip" id="ref-strip"></div>
+                </div>
+            </div>
+            <aside class="side-panel">
+                <h3>Observation</h3>
+                <ul class="meta-list" id="obs-meta"></ul>
+
+                <p class="ruler-link">
+                    <a id="ruler-link" href="https://iburyl.github.io/fabric_ruler.html"
+                       target="_blank" rel="noopener">Open in Fabric Ruler &#8599;</a>
+                    <span class="hint">
+                        Measure real-world sizes from the fabric weave. Opens the
+                        loaded observation directly.
+                    </span>
+                </p>
+            </aside>
+        </div>
+    </div>
+
+    <script>
+        (function () {
+            var root = document.getElementById("obs-root");
+            var input = document.getElementById("obs-url");
+            var loadBtn = document.getElementById("obs-load");
+            var obsSquare = document.getElementById("obs-square");
+            var obsStrip = document.getElementById("obs-strip");
+            var refSquare = document.getElementById("ref-square");
+            var refStrip = document.getElementById("ref-strip");
+            var refHeading = document.getElementById("ref-heading");
+            var metaEl = document.getElementById("obs-meta");
+            var statusEl = document.getElementById("obs-status");
+            var speciesUrlTmpl = root.dataset.speciesUrl;
+            var obsImg = document.getElementById("obs-img");
+            var rotSlider = document.getElementById("obs-rot");
+            var rotVal = document.getElementById("obs-rot-val");
+            var tbButtons = document.getElementById("tb-buttons");
+            var tbRotate = document.getElementById("tb-rotate");
+            var rulerLink = document.getElementById("ruler-link");
+            var RULER_URL = "https://iburyl.github.io/fabric_ruler.html";
+
+            function esc(value) {
+                var d = document.createElement("div");
+                d.textContent = value == null ? "" : String(value);
+                return d.innerHTML;
+            }
+            function parseId(text) {
+                if (!text) return null;
+                var m = String(text).match(/observations\/(\d+)/);
+                if (m) return m[1];
+                m = String(text).match(/^\s*(\d+)\s*$/);
+                return m ? m[1] : null;
+            }
+            function enlarge(url) {
+                return url ? url.replace("/square.", "/large.") : url;
+            }
+            function isCC(code) {
+                return !!code && code.toLowerCase().indexOf("cc") === 0;
+            }
+
+            // --- Interactive observation viewer: zoom / pan / rotate ---------------
+            var view = { scale: 1, tx: 0, ty: 0, rot: 0 };
+            // Per-photo view states for the current observation (index -> state);
+            // cleared whenever a new observation is loaded.
+            var photoItems = [];
+            var viewStates = [];
+            var currentIndex = -1;
+
+            function applyTransform() {
+                obsImg.style.transform =
+                    "translate(" + view.tx + "px," + view.ty + "px) " +
+                    "scale(" + view.scale + ") rotate(" + view.rot + "deg)";
+            }
+            function setRotation(deg) {
+                view.rot = deg;
+                rotSlider.value = String(deg);
+                rotVal.textContent = Math.round(deg) + "\u00b0";
+                applyTransform();
+            }
+            function resetView() {
+                view.scale = 1; view.tx = 0; view.ty = 0;
+                setRotation(0);
+            }
+            function clampScale(s) { return Math.min(10, Math.max(1, s)); }
+            function zoomBy(factor) {
+                view.scale = clampScale(view.scale * factor);
+                if (view.scale === 1) { view.tx = 0; view.ty = 0; }
+                applyTransform();
+            }
+
+            obsSquare.addEventListener("wheel", function (e) {
+                if (obsSquare.classList.contains("empty")) return;
+                e.preventDefault();
+                var rect = obsSquare.getBoundingClientRect();
+                var px = e.clientX - rect.left - rect.width / 2;
+                var py = e.clientY - rect.top - rect.height / 2;
+                var factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+                var ns = clampScale(view.scale * factor);
+                if (ns !== view.scale) {
+                    view.tx = px - (px - view.tx) * ns / view.scale;
+                    view.ty = py - (py - view.ty) * ns / view.scale;
+                    view.scale = ns;
+                    if (view.scale === 1) { view.tx = 0; view.ty = 0; }
+                    applyTransform();
+                }
+            }, { passive: false });
+
+            var dragging = false, lastX = 0, lastY = 0;
+            obsImg.addEventListener("pointerdown", function (e) {
+                dragging = true; lastX = e.clientX; lastY = e.clientY;
+                obsImg.classList.add("dragging");
+                try { obsImg.setPointerCapture(e.pointerId); } catch (_) {}
+            });
+            obsImg.addEventListener("pointermove", function (e) {
+                if (!dragging) return;
+                view.tx += e.clientX - lastX;
+                view.ty += e.clientY - lastY;
+                lastX = e.clientX; lastY = e.clientY;
+                applyTransform();
+            });
+            function endDrag(e) {
+                if (!dragging) return;
+                dragging = false;
+                obsImg.classList.remove("dragging");
+                try { obsImg.releasePointerCapture(e.pointerId); } catch (_) {}
+            }
+            obsImg.addEventListener("pointerup", endDrag);
+            obsImg.addEventListener("pointercancel", endDrag);
+
+            function collapseRotate() {
+                tbRotate.hidden = true;
+                tbButtons.hidden = false;
+            }
+            function expandRotate() {
+                tbButtons.hidden = true;
+                tbRotate.hidden = false;
+                rotSlider.focus();
+            }
+
+            tbButtons.addEventListener("click", function (e) {
+                var btn = e.target.closest("button");
+                if (!btn) return;
+                var act = btn.dataset.act;
+                if (act === "zoomin") zoomBy(1.25);
+                else if (act === "zoomout") zoomBy(1 / 1.25);
+                else if (act === "reset") resetView();
+                else if (act === "rotate") expandRotate();
+            });
+
+            rotSlider.addEventListener("input", function () {
+                setRotation(parseFloat(rotSlider.value) || 0);
+            });
+            rotSlider.addEventListener("blur", collapseRotate);
+
+            function saveCurrentView() {
+                if (currentIndex >= 0) {
+                    viewStates[currentIndex] = {
+                        scale: view.scale, tx: view.tx, ty: view.ty, rot: view.rot,
+                    };
+                }
+            }
+            function selectPhoto(i) {
+                if (i === currentIndex) return;
+                saveCurrentView();
+                currentIndex = i;
+                obsImg.src = photoItems[i].main;
+                var st = viewStates[i];
+                if (st) {
+                    view.scale = st.scale; view.tx = st.tx; view.ty = st.ty;
+                    setRotation(st.rot);
+                } else {
+                    view.scale = 1; view.tx = 0; view.ty = 0;
+                    setRotation(0);
+                }
+                Array.prototype.forEach.call(obsStrip.children, function (c, idx) {
+                    c.classList.toggle("active", idx === i);
+                });
+            }
+
+            function renderObservation(items) {
+                obsStrip.innerHTML = "";
+                photoItems = items;
+                viewStates = [];
+                currentIndex = -1;
+                if (!items.length) {
+                    obsSquare.classList.add("empty");
+                    obsImg.removeAttribute("src");
+                    return;
+                }
+                obsSquare.classList.remove("empty");
+                items.forEach(function (it) {
+                    var t = document.createElement("img");
+                    t.src = it.thumb;
+                    t.loading = "lazy";
+                    var idx = obsStrip.children.length;
+                    t.addEventListener("click", function () { selectPhoto(idx); });
+                    obsStrip.appendChild(t);
+                });
+                selectPhoto(0);
+            }
+
+            // Render one column: a big square (object-fit: contain) plus a strip of
+            // clickable thumbnails. `items` is [{main, thumb}]; `linkHref` (optional)
+            // wraps the main image in a link.
+            function renderColumn(squareEl, stripEl, items, linkHref, emptyText) {
+                squareEl.innerHTML = "";
+                stripEl.innerHTML = "";
+                if (!items.length) {
+                    squareEl.innerHTML = "<p class='muted'>" + esc(emptyText || "None") + "</p>";
+                    return;
+                }
+                var mainImg = document.createElement("img");
+                mainImg.src = items[0].main;
+                if (linkHref) {
+                    var a = document.createElement("a");
+                    a.href = linkHref;
+                    a.appendChild(mainImg);
+                    squareEl.appendChild(a);
+                } else {
+                    squareEl.appendChild(mainImg);
+                }
+                items.forEach(function (it, i) {
+                    var t = document.createElement("img");
+                    t.src = it.thumb;
+                    t.loading = "lazy";
+                    if (i === 0) t.className = "active";
+                    t.addEventListener("click", function () {
+                        mainImg.src = it.main;
+                        stripEl.querySelectorAll("img").forEach(function (x) {
+                            x.classList.remove("active");
+                        });
+                        t.classList.add("active");
+                    });
+                    stripEl.appendChild(t);
+                });
+            }
+
+            function metaRow(label, valueHtml, cls) {
+                return "<li><span>" + esc(label) + "</span>" +
+                    "<span class='val" + (cls ? " " + cls : "") + "'>" + valueHtml + "</span></li>";
+            }
+
+            function renderMeta(obs) {
+                var taxon = obs.taxon || {};
+                var user = obs.user || {};
+                var quality = obs.quality_grade || "";
+                var isResearch = quality === "research";
+                var license = obs.license_code;
+
+                var html = "";
+                html += metaRow("observation",
+                    "<a href='https://www.inaturalist.org/observations/" + obs.id +
+                    "' target='_blank' rel='noopener'>" + obs.id + "</a>");
+                html += metaRow("taxon",
+                    esc(taxon.name || "—") + (taxon.id ? " (" + taxon.id + ")" : ""));
+                html += metaRow("common name", esc(taxon.preferred_common_name || "—"));
+                html += metaRow("rank", esc(taxon.rank || "—"));
+                html += metaRow("quality",
+                    (isResearch ? "\u2714 " : "") + esc(quality || "—"),
+                    isResearch ? "research-ok" : "");
+                html += metaRow("license",
+                    esc(license || "none"), isCC(license) ? "" : "license-bad");
+                html += metaRow("observed on", esc(obs.observed_on || "—"));
+                html += metaRow("place", esc(obs.place_guess || "—"));
+                html += metaRow("observer", esc(user.login || "—"));
+                metaEl.innerHTML = html;
+            }
+
+            function loadSpecies(obs) {
+                var taxon = obs.taxon || {};
+                var latin = taxon.name || "";
+                refHeading.textContent = latin
+                    ? "Reference image for: " + latin
+                    : "Reference image";
+                if (!taxon.id) {
+                    renderColumn(refSquare, refStrip, [], null, "No taxon.");
+                    return;
+                }
+                var url = speciesUrlTmpl.replace("TAXID", encodeURIComponent(taxon.id));
+                renderColumn(refSquare, refStrip, [], null, "Checking\u2026");
+                fetch(url)
+                    .then(function (r) { return r.json(); })
+                    .then(function (s) {
+                        if (!s.exists) {
+                            renderColumn(refSquare, refStrip, [], null, "Not tracked on this site.");
+                            return;
+                        }
+                        var items = (s.starred || []).map(function (e) {
+                            return { main: e.image_url, thumb: e.thumbnail_url };
+                        });
+                        if (!items.length && s.reference) {
+                            items = [{ main: s.reference.image_url, thumb: s.reference.thumbnail_url }];
+                        }
+                        renderColumn(refSquare, refStrip, items, s.poses_url,
+                            "Tracked, but no starred image yet.");
+                    })
+                    .catch(function () {
+                        renderColumn(refSquare, refStrip, [], null, "Species lookup failed.");
+                    });
+            }
+
+            function load() {
+                var id = parseId(input.value);
+                if (!id) {
+                    statusEl.textContent = "Enter an iNaturalist observation URL or id.";
+                    return;
+                }
+                statusEl.textContent = "Loading\u2026";
+                rulerLink.href = RULER_URL + "?inats_obs=" + encodeURIComponent(id);
+                renderObservation([]);
+                refSquare.innerHTML = "";
+                refStrip.innerHTML = "";
+                metaEl.innerHTML = "";
+                refHeading.textContent = "Reference image";
+                loadBtn.disabled = true;
+                fetch("https://api.inaturalist.org/v1/observations/" + id)
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        var obs = data && data.results && data.results[0];
+                        if (!obs) {
+                            statusEl.textContent = "Observation not found.";
+                            return;
+                        }
+                        statusEl.textContent = "";
+                        var items = (obs.photos || []).map(function (p) {
+                            return { main: enlarge(p.url), thumb: p.url };
+                        });
+                        renderObservation(items);
+                        renderMeta(obs);
+                        loadSpecies(obs);
+                    })
+                    .catch(function () {
+                        statusEl.textContent = "Failed to load from iNaturalist.";
+                    })
+                    .then(function () { loadBtn.disabled = false; });
+            }
+
+            loadBtn.addEventListener("click", load);
+            input.addEventListener("keydown", function (e) {
+                if (e.key === "Enter") { load(); e.preventDefault(); }
+            });
+        })();
+    </script>
+{% endblock %}
