@@ -1,0 +1,91 @@
+{% comment %}
+Flat per-species stats table (thumbnail, taxonomy, per-stage / view / labels
+counts, obs). Expects `rows` (see views._index_row) and `stages`. Shared by the
+legacy index and the genus-level browse page.
+{% endcomment %}
+<style>
+    .tax-table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 0.9rem;
+    }
+    .tax-table th, .tax-table td {
+        padding: 0.5rem 0.75rem;
+        border-bottom: 1px solid #8883;
+        text-align: right;
+        white-space: nowrap;
+    }
+    .tax-table th { color: #6b7280; font-weight: 600; text-align: right; }
+    .tax-table .tax-col { text-align: left; }
+    .tax-table .group-head { text-align: center; }
+    .tax-table tbody tr:hover { background: #8881; }
+    .tax-table td.num { font-variant-numeric: tabular-nums; }
+    .tax-table .zero { color: #9ca3af; }
+    .tax-table .part { font-weight: 600; text-decoration: none; }
+    .tax-table .part:hover { text-decoration: underline; }
+    .tax-table a { font-weight: 600; }
+    .col-group { border-left: 1px solid #8883; }
+    .tax-table .thumb-col { text-align: center; width: 76px; }
+    .tax-thumb {
+        display: block; width: 60px; height: 60px; object-fit: cover;
+        border-radius: 6px; background: #8881;
+    }
+    .thumb-empty {
+        display: inline-block; width: 60px; height: 60px;
+        border-radius: 6px; background: #8881;
+    }
+</style>
+<table class="tax-table">
+    <thead>
+        <tr>
+            <th class="thumb-col" rowspan="2"></th>
+            <th class="tax-col" rowspan="2">superfamily</th>
+            <th class="tax-col" rowspan="2">family</th>
+            <th class="tax-col" rowspan="2">subfamily</th>
+            <th class="tax-col" rowspan="2">species</th>
+            <th class="group-head col-group" colspan="{{ stages|length }}">stages</th>
+            <th class="group-head col-group" colspan="4">view</th>
+            <th class="group-head col-group" colspan="2">labels</th>
+            <th class="col-group" rowspan="2" title="iNaturalist observation count (from the names CSV)">obs</th>
+        </tr>
+        <tr>
+            {% for stage in stages %}
+                <th{% if forloop.first %} class="col-group"{% endif %}>{{ stage }}</th>
+            {% endfor %}
+            <th class="col-group">top-down</th>
+            <th>side</th>
+            <th>bottom-up</th>
+            <th>unclear</th>
+            <th class="col-group">no stage</th>
+            <th>no box</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for row in rows %}
+            <tr>
+                <td class="thumb-col">
+                    {% if row.thumbnail %}
+                        <a href="{% url 'moths:tax_detail' row.tax_id %}">
+                            <img class="tax-thumb" src="{% url 'moths:serve_norm_thumbnail' row.thumbnail %}" alt="{{ row.species|default:row.tax_id }}" loading="lazy">
+                        </a>
+                    {% else %}
+                        <span class="thumb-empty" title="Visit the poses view to build a thumbnail"></span>
+                    {% endif %}
+                </td>
+                <td class="tax-col">{{ row.superfamily|default:"—" }}</td>
+                <td class="tax-col">{{ row.family|default:"—" }}</td>
+                <td class="tax-col">{{ row.subfamily|default:"—" }}</td>
+                <td class="tax-col"><a href="{% url 'moths:pose_view' row.tax_id %}" title="{% if row.name %}{{ row.name }} ({{ row.tax_id }}){% else %}{{ row.tax_id }}{% endif %}">{{ row.species|default:row.tax_id }}</a></td>
+                {% for cell in row.stage_cells %}
+                    <td class="num{% if forloop.first %} col-group{% endif %}">{% include "moths/_count_cell.html" with count=cell.count color=cell.color tax_id=row.tax_id qkey="stage" qval=cell.stage %}</td>
+                {% endfor %}
+                {% for cell in row.view_cells %}
+                    <td class="num{% if forloop.first %} col-group{% endif %}">{% include "moths/_count_cell.html" with count=cell.count color=cell.color tax_id=row.tax_id qkey="pose" qval=cell.pose %}</td>
+                {% endfor %}
+                <td class="num col-group">{% include "moths/_count_cell.html" with count=row.no_stage tax_id=row.tax_id qkey="stage" qval="none" %}</td>
+                <td class="num">{% include "moths/_count_cell.html" with count=row.no_box tax_id=row.tax_id qkey="labeled" qval="no" %}</td>
+                <td class="num col-group">{% if row.obs %}{{ row.obs }}{% else %}<span class="zero">—</span>{% endif %}</td>
+            </tr>
+        {% endfor %}
+    </tbody>
+</table>

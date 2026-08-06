@@ -1,0 +1,104 @@
+{% extends "moths/base.html" %}
+{% load moth_names %}
+
+{% block title %}Browse taxonomy — Moths List{% endblock %}
+
+{% block content %}
+<style>
+    .crumbs { margin: 0 0 1rem; font-size: 0.95rem; }
+    .crumbs a { }
+    .crumbs .sep { color: #6b7280; margin: 0 0.35rem; }
+    .crumbs .current { font-weight: 600; }
+
+    .node-counts { margin: 0 0 1.25rem; color: #374151; font-size: 0.9rem; }
+    .node-counts b { font-weight: 600; }
+
+    table.browse { border-collapse: collapse; width: 100%; }
+    table.browse th, table.browse td {
+        padding: 0.4rem 0.7rem; text-align: right; border-bottom: 1px solid #8882;
+        white-space: nowrap;
+    }
+    table.browse th.name, table.browse td.name { text-align: left; }
+    table.browse th.thumb, table.browse td.thumb { text-align: center; width: 64px; }
+    table.browse thead th { border-bottom: 2px solid #8884; font-size: 0.85rem; }
+    table.browse thead th.group { text-align: center; }
+    table.browse td.name a { font-weight: 500; }
+    table.browse tbody tr:hover { background: #8881; }
+    .browse-thumb {
+        width: 56px; height: 56px; object-fit: cover; border-radius: 4px;
+        background: #8881; display: block; margin: 0 auto;
+    }
+    .browse-thumb.empty { background: #8881; }
+    .flag-yes { color: #16a34a; }
+    .flag-no { color: #9ca3af; }
+    .num-zero { color: #9ca3af; }
+</style>
+
+{% if missing %}
+    <p class="muted">
+        The taxonomy summary (<code>labels/tax_summary.json</code>) has not been
+        built yet. Run <code>tools/rebuild_poses.py</code> (or open a species'
+        poses view) to generate it.
+    </p>
+{% else %}
+    <nav class="crumbs">
+        {% for c in crumbs %}
+            {% if forloop.last %}
+                <span class="current">{{ c.label }}</span>
+            {% else %}
+                <a href="{{ c.url }}">{{ c.label }}</a><span class="sep">/</span>
+            {% endif %}
+        {% endfor %}
+    </nav>
+
+    <p class="node-counts">
+        {{ node_counts.species_want }} species here —
+        <b>{{ node_counts.species_have_image }}</b> with images,
+        {{ node_counts.species_have_zero }} with a summary but no images.
+        {% if not child_is_species %}
+            {{ node_counts.want }} {{ child_level }} ({{ node_counts.have_any }} with data,
+            {{ node_counts.have_all }} complete).
+        {% endif %}
+    </p>
+
+    {% if child_is_species %}
+        <p class="muted">Class counts combine hand labels and predictions; the number's colour shows its source — <span style="color:#16a34a; font-weight:600">green = label</span>, <span style="color:#2563eb; font-weight:600">blue = prediction</span>, blended in between.</p>
+        {% include "moths/_index_table.html" with rows=index_rows %}
+    {% else %}
+        <table class="browse">
+            <thead>
+                <tr>
+                    <th class="thumb"></th>
+                    <th class="name">{{ child_level }} ({{ children|length }})</th>
+                    <th title="Number of {{ next_level }} entities in this group">{{ next_level }}</th>
+                    <th title="Species with an image folder on disk, of species expected">species</th>
+                    <th title="Total images under this category">images</th>
+                    <th title="Images with no hand stage label">no stage</th>
+                    <th title="Images with no hand box label">no box</th>
+                    <th title="Total iNaturalist observations (from the names CSV)">obs</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in children %}
+                    <tr>
+                        <td class="thumb">
+                            {% if row.thumbnail %}
+                                <a href="{{ row.url }}"><img class="browse-thumb" src="{% url 'moths:serve_norm_thumbnail' row.thumbnail %}" alt="{{ row.label }}" loading="lazy"></a>
+                            {% else %}
+                                <span class="browse-thumb empty"></span>
+                            {% endif %}
+                        </td>
+                        <td class="name"><a href="{{ row.url }}">{{ row.label }}</a></td>
+                        <td>{{ row.want }}</td>
+                        <td>{% if row.species_have_folder == row.species_want %}{{ row.species_have_folder }}{% else %}{{ row.species_have_folder }} of {{ row.species_want }}{% endif %}</td>
+                        <td>{% if row.images %}{{ row.images }}{% else %}<span class="num-zero">0</span>{% endif %}</td>
+                        <td>{% if row.no_stage %}{{ row.no_stage }}{% else %}<span class="num-zero">0</span>{% endif %}</td>
+                        <td>{% if row.no_box %}{{ row.no_box }}{% else %}<span class="num-zero">0</span>{% endif %}</td>
+                        <td>{% if row.obs %}{{ row.obs }}{% else %}<span class="num-zero">—</span>{% endif %}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% endif %}
+{% endif %}
+{% endblock %}

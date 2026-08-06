@@ -4,27 +4,16 @@
 {% block title %}{% tax_species tax_id %} — Moths List{% endblock %}
 
 {% block content %}
-    <h2 style="margin-top:0;">{% tax_name tax_id %}</h2>
-    <p class="muted">
-        {{ total }} image{{ total|pluralize }} grouped by stage and pose
-        {% if is_filtered %}
-            of {{ total_all }} · filtered by <strong>{{ filter_desc }}</strong>
+    <h2 class="tax-heading">{% tax_breadcrumb tax_id %}</h2>
+    {% if is_filtered %}
+        <p class="muted">
+            Filtered by <strong>{{ filter_desc }}</strong>
             · <a href="{% url 'moths:pose_view' tax_id %}">show all</a>
-        {% endif %}
-    </p>
-
-    {% if has_images %}
-    <form method="post"
-          action="{% url 'moths:rebuild_poses' tax_id %}{% if filter_qs %}?{{ filter_qs }}{% endif %}"
-          style="margin: 0 0 1rem;"
-          onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Rebuilding…';">
-        {% csrf_token %}
-        <button type="submit" class="rebuild-btn" title="Recompute pose classes and scores for this tax_id">
-            Rebuild pose index
-        </button>
-    </form>
+            ({{ total }} of {{ total_all }})
+        </p>
     {% endif %}
 
+    {% include "moths/_viewer_style.html" %}
     <style>
         .rebuild-btn {
             font: inherit; font-size: 0.85rem; padding: 0.35rem 0.8rem;
@@ -33,19 +22,49 @@
         }
         .rebuild-btn:hover:not(:disabled) { background: #8883; border-color: #2563eb; }
         .rebuild-btn:disabled { opacity: 0.6; cursor: default; }
+        .wing-stats {
+            display: block; width: 100%; max-width: 320px;
+            border: 1px solid #8883; border-radius: 8px; background: #fff;
+        }
         .pose-group { margin: 1.5rem 0; }
         .pose-group h3 {
             display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.5rem;
             border-bottom: 1px solid #8883; padding-bottom: 0.35rem;
         }
         .pose-group h3 .count { color: #6b7280; font-weight: 400; font-size: 0.9rem; }
-        .group-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-left: auto; }
-        .bulk-btn {
-            padding: 0.3rem 0.7rem; border: 1px solid #8883; border-radius: 6px;
-            color: #fff; cursor: pointer; font-size: 0.8rem; font-weight: 400;
+        /* Low-key, link-like "select all" per group (lighter than the count). */
+        .select-all-btn {
+            font: inherit; font-size: 0.8rem; font-weight: 400; color: #aeb4bc;
+            background: none; border: 0; padding: 0; margin-left: 0.35rem;
+            cursor: pointer; text-decoration: none;
         }
-        .bulk-btn:disabled { opacity: 0.6; cursor: default; }
-        .bulk-stage { background: #16a34a; }
+        .select-all-btn:hover { text-decoration: underline; color: #6b7280; }
+        /* Selection mode (sidebar-toggled). */
+        .select-toggle.active { background: #2563eb; border-color: #2563eb; color: #fff; }
+        .select-stage-buttons { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.5rem 0; }
+        .select-stage-btn {
+            padding: 0.35rem 0.7rem; border: 1px solid #8883; border-radius: 6px;
+            background: #16a34a; color: #fff; cursor: pointer; font-size: 0.85rem;
+        }
+        .select-stage-btn:disabled { opacity: 0.6; cursor: default; }
+        /* Delete is grey at rest and turns red on hover to flag its danger. */
+        .select-delete-btn {
+            padding: 0.35rem 0.7rem; border: 1px solid #8883; border-radius: 6px;
+            background: #6b7280; color: #fff; cursor: pointer; font-size: 0.85rem;
+        }
+        .select-delete-btn:hover { background: #dc2626; border-color: #dc2626; }
+        .select-delete-btn:disabled { opacity: 0.6; cursor: default; }
+        .image-grid.selectable a { cursor: pointer; }
+        /* Outer ring + glow so the selection sits around the plate, never over
+           the image (an inset outline looked uneven against the photo). */
+        .image-grid li.selected figure {
+            box-shadow: 0 0 0 3px #2563eb, 0 0 10px 2px rgba(37, 99, 235, 0.6);
+        }
+        .image-grid li.selected figure::after {
+            content: "\2713"; position: absolute; top: 6px; right: 6px; z-index: 2;
+            width: 22px; height: 22px; border-radius: 50%; background: #2563eb;
+            color: #fff; font-size: 0.9rem; line-height: 22px; text-align: center;
+        }
         .image-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
@@ -72,15 +91,10 @@
         .status-rebuild { color: #f59e0b; font-weight: 600; }
         .status-pred { color: #2563eb; font-weight: 600; }
         .scaled { color: #9ca3af; }
-        .sort-bar { display: flex; gap: 0.5rem; margin: 0.6rem 0; }
-        .sort-bar button {
-            font: inherit; font-size: 0.8rem; padding: 0.25rem 0.6rem;
-            border: 1px solid #8884; border-radius: 6px; background: #8881;
-            color: inherit; cursor: pointer;
-        }
-        .sort-bar button:hover { background: #8883; }
-        .sort-bar button.active { background: #2563eb; border-color: #2563eb; color: #fff; }
     </style>
+
+    <div class="detail-layout">
+    <div class="viewer-col">
 
     {% if not groups %}
         <p class="muted">
@@ -92,39 +106,8 @@
         <section class="pose-group">
             <h3>
                 {{ group.label }} <span class="count">{{ group.rows|length }}</span>
-                {% if group.is_unknown %}
-                    <span class="group-actions">
-                        {% if group.is_unknown %}
-                            <button type="button" class="bulk-btn bulk-stage"
-                                    data-url="{% url 'moths:add_to_stage' tax_id 'Larva' %}{% if filter_qs %}?{{ filter_qs }}{% endif %}"
-                                    data-csrf="{{ csrf_token }}"
-                                    data-count="{{ group.rows|length }}"
-                                    data-label="Larva">
-                                Add {{ group.rows|length }} to Larvae
-                            </button>
-                            <button type="button" class="bulk-btn bulk-stage"
-                                    data-url="{% url 'moths:add_to_stage' tax_id 'Adult' %}{% if filter_qs %}?{{ filter_qs }}{% endif %}"
-                                    data-csrf="{{ csrf_token }}"
-                                    data-count="{{ group.rows|length }}"
-                                    data-label="Adult">
-                                Add {{ group.rows|length }} to Adult
-                            </button>
-                        {% endif %}
-                    </span>
-                {% endif %}
+                <button type="button" class="select-all-btn">select all</button>
             </h3>
-
-            {% if group.has_keypoints %}
-                <div class="sort-bar">
-                    <button type="button" data-sort="name" data-dir="asc">sort by name</button>
-                    <button type="button" data-sort="symmetry" data-dir="asc">sort by symmetry</button>
-                    <button type="button" data-sort="pixels" data-dir="desc">sort by pixels</button>
-                    {% if group.is_top_down %}
-                        <button type="button" data-sort="sharpness" data-dir="desc">sort by sharpness</button>
-                        <button type="button" data-sort="score" data-dir="desc" class="active">sort by score</button>
-                    {% endif %}
-                </div>
-            {% endif %}
 
             <ul class="image-grid">
                 {% for row in group.rows %}
@@ -163,6 +146,7 @@
                                     {% endif %}
                                 {% else %}
                                     obs {{ row.image.obs_id }} · photo {{ row.image.photo_id }}
+                                    {% if row.from_prediction %}<br><span class="status-pred">from prediction</span>{% endif %}
                                 {% endif %}
                             </figcaption>
                         </figure>
@@ -171,77 +155,250 @@
             </ul>
         </section>
     {% endfor %}
+    </div>
 
-    <span id="bulk-status" class="muted"></span>
+    <aside class="side-panel">
+        <h3>Taxon</h3>
+        <ul class="meta-list">
+            <li><span>tax_id</span><span>{{ tax_id }}</span></li>
+            <li><span>iNaturalist</span><span><a href="https://www.inaturalist.org/taxa/{{ tax_id }}" target="_blank" rel="noopener">view taxon &#8599;</a></span></li>
+        </ul>
+
+        {% if has_images %}
+        <h3>Selection</h3>
+        <div class="subsection" id="select-panel"
+             data-url="{% url 'moths:set_selection_stage' tax_id %}"
+             data-delete-url="{% url 'moths:delete_selection' tax_id %}"
+             data-csrf="{{ csrf_token }}">
+            <button type="button" id="select-toggle" class="rebuild-btn select-toggle"
+                    title="Click images to select them instead of opening them">
+                Selection mode
+            </button>
+            <div id="select-actions" hidden>
+                <p class="muted" style="margin:0.5rem 0 0;">
+                    <span id="select-count">0</span> selected — move to:
+                </p>
+                <div class="select-stage-buttons">
+                    <button type="button" class="select-stage-btn" data-stage="Egg">Egg</button>
+                    <button type="button" class="select-stage-btn" data-stage="Larva">Larva</button>
+                    <button type="button" class="select-stage-btn" data-stage="Pupa">Pupa</button>
+                    <button type="button" class="select-stage-btn" data-stage="Adult">Adult</button>
+                </div>
+                <p class="muted" style="margin:0.5rem 0 0;">or delete (starred images are skipped):</p>
+                <div class="select-stage-buttons">
+                    <button type="button" class="select-delete-btn" id="select-delete">Delete</button>
+                </div>
+                <span id="select-status" class="muted"></span>
+            </div>
+        </div>
+        {% endif %}
+
+        {% if wing_stats_available %}
+        <h3>Wing positions (top-down)</h3>
+        <div class="subsection">
+            <img class="wing-stats" src="{% url 'moths:serve_wing_stats' tax_id %}" alt="L/R wing position scatter for top-down poses">
+            <p class="muted" style="margin:0.4rem 0 0; font-size:0.8rem;">
+                All top-down poses aligned on a common F/B axis (midpoint centred,
+                F above B), scaled to fit.
+                <span style="color:#3b82f6;">Blue = L</span>, <span style="color:#ef4444;">red = R</span>.
+            </p>
+        </div>
+        {% endif %}
+
+        {% if side_wing_stats_available %}
+        <h3>Wing positions (side)</h3>
+        <div class="subsection">
+            <img class="wing-stats" src="{% url 'moths:serve_side_wing_stats' tax_id %}" alt="Wing position scatter for side-view poses">
+            <p class="muted" style="margin:0.4rem 0 0; font-size:0.8rem;">
+                All side poses aligned on a common F/B axis (midpoint centred,
+                F left, B right), scaled to fit. R-views are mirrored across the
+                F/B axis to overlay the L-views.
+                <span style="color:#7c3aed;">Purple = wing</span>.
+            </p>
+        </div>
+        {% endif %}
+
+        {% if has_images %}
+        <h3>Advanced actions</h3>
+        <div class="subsection">
+            <form method="post"
+                  action="{% url 'moths:rebuild_poses' tax_id %}{% if filter_qs %}?{{ filter_qs }}{% endif %}"
+                  style="margin: 0;"
+                  onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Rebuilding…';">
+                {% csrf_token %}
+                <button type="submit" class="rebuild-btn" title="Recompute pose classes and scores for this tax_id">
+                    Rebuild pose index
+                </button>
+            </form>
+        </div>
+        {% endif %}
+    </aside>
+    </div>
 
     <script>
         (function () {
-            function sortGrid(grid, key, dir) {
-                var items = Array.prototype.slice.call(grid.children);
-                var numeric = key !== "name";
-                items.sort(function (a, b) {
-                    // Starred items always come first, regardless of sort key.
-                    var as = a.dataset.starred === "1", bs = b.dataset.starred === "1";
-                    if (as !== bs) return as ? -1 : 1;
-                    var av = a.dataset[key], bv = b.dataset[key];
-                    if (numeric) {
-                        var an = av === "" ? NaN : parseFloat(av);
-                        var bn = bv === "" ? NaN : parseFloat(bv);
-                        // Missing values always sort to the end.
-                        var aMissing = isNaN(an), bMissing = isNaN(bn);
-                        if (aMissing || bMissing) {
-                            return aMissing === bMissing ? 0 : (aMissing ? 1 : -1);
-                        }
-                        return dir === "asc" ? an - bn : bn - an;
-                    }
-                    var cmp = av.localeCompare(bv, undefined, { numeric: true });
-                    return dir === "asc" ? cmp : -cmp;
-                });
-                items.forEach(function (item) { grid.appendChild(item); });
-            }
+            // --- Selection mode -------------------------------------------------
+            // Toggled from the sidebar. While on, clicking an image selects it
+            // (instead of opening it); the sidebar's stage buttons then relabel
+            // every selected image. A successful move reloads the page, which
+            // both drops the selection and turns the mode back off.
+            var panel = document.getElementById("select-panel");
+            if (panel) {
+                var toggle = document.getElementById("select-toggle");
+                var actions = document.getElementById("select-actions");
+                var countEl = document.getElementById("select-count");
+                var statusEl = document.getElementById("select-status");
+                var stageButtons = panel.querySelectorAll(".select-stage-btn");
+                var grids = document.querySelectorAll(".image-grid");
+                var selectMode = false;
 
-            document.querySelectorAll(".sort-bar").forEach(function (bar) {
-                var grid = bar.nextElementSibling;
-                bar.querySelectorAll("button").forEach(function (btn) {
-                    btn.addEventListener("click", function () {
-                        sortGrid(grid, btn.dataset.sort, btn.dataset.dir);
-                        bar.querySelectorAll("button").forEach(function (b) {
-                            b.classList.remove("active");
-                        });
-                        btn.classList.add("active");
+                function selectedItems() {
+                    return Array.prototype.slice.call(
+                        document.querySelectorAll(".image-grid li.selected")
+                    );
+                }
+                function updateCount() {
+                    countEl.textContent = selectedItems().length;
+                }
+                function clearSelection() {
+                    selectedItems().forEach(function (li) {
+                        li.classList.remove("selected");
+                    });
+                    updateCount();
+                }
+                function setMode(on) {
+                    selectMode = on;
+                    actions.hidden = !on;
+                    toggle.classList.toggle("active", on);
+                    toggle.textContent = on ? "Exit selection mode" : "Selection mode";
+                    grids.forEach(function (g) { g.classList.toggle("selectable", on); });
+                    if (!on) { clearSelection(); statusEl.textContent = ""; }
+                }
+
+                toggle.addEventListener("click", function () { setMode(!selectMode); });
+
+                grids.forEach(function (grid) {
+                    grid.addEventListener("click", function (e) {
+                        if (!selectMode) return;
+                        var li = e.target.closest("li");
+                        if (!li || !grid.contains(li)) return;
+                        e.preventDefault();  // don't open the image
+                        li.classList.toggle("selected");
+                        updateCount();
                     });
                 });
-            });
 
-            var buttons = document.querySelectorAll(".bulk-btn");
-            var status = document.getElementById("bulk-status");
-            buttons.forEach(function (btn) {
-                btn.addEventListener("click", function () {
-                    var n = btn.dataset.count;
-                    var label = btn.dataset.label;
-                    if (!window.confirm("Apply \u201c" + label + "\u201d to " + n + " image(s)?")) return;
-                    buttons.forEach(function (b) { b.disabled = true; });
-                    status.textContent = "Saving\u2026";
-                    fetch(btn.dataset.url, {
-                        method: "POST",
-                        headers: { "X-CSRFToken": btn.dataset.csrf },
-                    })
-                        .then(function (r) { return r.json(); })
-                        .then(function (data) {
-                            if (data.ok) {
-                                status.textContent = "Applied \u201c" + label + "\u201d to " + data.count + ". Reloading\u2026";
-                                window.location.reload();
-                            } else {
-                                status.textContent = "Error: " + (data.error || "failed");
-                                buttons.forEach(function (b) { b.disabled = false; });
-                            }
-                        })
-                        .catch(function () {
-                            status.textContent = "Failed.";
-                            buttons.forEach(function (b) { b.disabled = false; });
+                // Per-group "select all": turn selection mode on (if needed) and
+                // select every image in that group's grid.
+                document.querySelectorAll(".select-all-btn").forEach(function (btn) {
+                    btn.addEventListener("click", function () {
+                        if (!selectMode) setMode(true);
+                        var section = btn.closest(".pose-group");
+                        var grid = section && section.querySelector(".image-grid");
+                        if (!grid) return;
+                        Array.prototype.forEach.call(grid.children, function (li) {
+                            li.classList.add("selected");
                         });
+                        updateCount();
+                    });
                 });
-            });
+
+                stageButtons.forEach(function (btn) {
+                    btn.addEventListener("click", function () {
+                        var names = selectedItems().map(function (li) {
+                            return li.dataset.name;
+                        });
+                        if (names.length === 0) {
+                            statusEl.textContent = "Nothing selected.";
+                            return;
+                        }
+                        var stage = btn.dataset.stage;
+                        if (!window.confirm(
+                            "Move " + names.length + " image(s) to \u201c" + stage + "\u201d?"
+                        )) return;
+                        stageButtons.forEach(function (b) { b.disabled = true; });
+                        statusEl.textContent = "Saving\u2026";
+                        fetch(panel.dataset.url, {
+                            method: "POST",
+                            headers: {
+                                "X-CSRFToken": panel.dataset.csrf,
+                                "Content-Type": "application/json",
+                            },
+                            body: JSON.stringify({ stage: stage, filenames: names }),
+                        })
+                            .then(function (r) { return r.json(); })
+                            .then(function (data) {
+                                if (data.ok) {
+                                    statusEl.textContent =
+                                        "Moved " + data.count + " to \u201c" + stage +
+                                        "\u201d. Reloading\u2026";
+                                    window.location.reload();
+                                } else {
+                                    statusEl.textContent = "Error: " + (data.error || "failed");
+                                    stageButtons.forEach(function (b) { b.disabled = false; });
+                                }
+                            })
+                            .catch(function () {
+                                statusEl.textContent = "Failed.";
+                                stageButtons.forEach(function (b) { b.disabled = false; });
+                            });
+                    });
+                });
+
+                // Delete: physically removes the selected images and all their
+                // files. Starred images are skipped server-side. Reloads on
+                // success (dropping the selection and turning the mode off).
+                var deleteBtn = document.getElementById("select-delete");
+                if (deleteBtn) {
+                    function setDisabled(on) {
+                        stageButtons.forEach(function (b) { b.disabled = on; });
+                        deleteBtn.disabled = on;
+                    }
+                    deleteBtn.addEventListener("click", function () {
+                        var names = selectedItems().map(function (li) {
+                            return li.dataset.name;
+                        });
+                        if (names.length === 0) {
+                            statusEl.textContent = "Nothing selected.";
+                            return;
+                        }
+                        if (!window.confirm(
+                            "Permanently delete " + names.length + " image(s) and all " +
+                            "their files? Starred images are skipped. This cannot be undone."
+                        )) return;
+                        setDisabled(true);
+                        statusEl.textContent = "Deleting\u2026";
+                        fetch(panel.dataset.deleteUrl, {
+                            method: "POST",
+                            headers: {
+                                "X-CSRFToken": panel.dataset.csrf,
+                                "Content-Type": "application/json",
+                            },
+                            body: JSON.stringify({ filenames: names }),
+                        })
+                            .then(function (r) { return r.json(); })
+                            .then(function (data) {
+                                if (data.ok) {
+                                    var msg = "Deleted " + data.deleted;
+                                    if (data.skipped_starred) {
+                                        msg += " (skipped " + data.skipped_starred +
+                                            " starred)";
+                                    }
+                                    statusEl.textContent = msg + ". Reloading\u2026";
+                                    window.location.reload();
+                                } else {
+                                    statusEl.textContent =
+                                        "Error: " + (data.error || "failed");
+                                    setDisabled(false);
+                                }
+                            })
+                            .catch(function () {
+                                statusEl.textContent = "Failed.";
+                                setDisabled(false);
+                            });
+                    });
+                }
+            }
         })();
     </script>
 {% endblock %}

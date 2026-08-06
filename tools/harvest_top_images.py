@@ -1,37 +1,58 @@
 #!/usr/bin/env python3
 
-"""Harvest the best top-down photos for a taxon from iNaturalist.
+"""Harvest the best top-down and side-view photos for a taxon from iNaturalist.
 
 For a given iNaturalist taxon this walks research-grade observations
 (newest first) and, for each one whose main photo carries a Creative Commons
 (``cc*``) licence, branches on the observation's Life Stage annotation:
 
-* **Adult or unannotated** – the pose candidate path: download the main photo,
-  run the YOLO pose model, keep only ``top-down`` poses, compute the same
-  symmetry / pixel-span / sharpness metrics the Django app uses (via
-  ``moths.utils``) and keep the image only when *every* scaled 0..1 sub-score
-  exceeds a threshold (default ``0.5``). Kept images are labelled ``Adult``.
-* **Any other stage** (larva/pupa/egg) – the sample path: no pose prediction;
-  just keep up to ``--stage-samples`` images per stage (default 5) and label
-  each with the matching Django stage. Stages with no moth class (nymph,
-  juvenile, subimago) are skipped.
+* **Adult or unannotated** – the pose candidate path: download the main photo
+  and run the exact same three-model prediction scheme as
+  ``ultralytics-predict.py`` (shared code): a classification model picks the
+  viewpoint, then the general or side-view pose model places keypoints (with
+  the same confidence-independent visibility rules). Only images that come out
+  as ``top-down`` (pinned or not) or ``side view`` are kept:
 
-It keeps going, paging further back through observations, until it has
-collected ``--target`` adult pose images (default 20) or iNaturalist has no more
-observations. The search stops as soon as the pose target is met (stage-sample
-quotas may end up partially filled). Non-qualifying pose downloads (wrong pose
-or low score) are deleted so the dataset only gains images that pass.
+  - top-down: scored on symmetry / pixel-span / sharpness (via ``moths.utils``);
+  - side view: scored on pixel-span / sharpness only (symmetry is undefined for
+    a single wing);
 
-The data directories are passed explicitly (never read from ``settings.py``):
-``--images-dir`` (photos + ``<tax>_observations.json``), ``--test-dir``
-(predicted keypoint ``.txt`` files), ``--labels-dir`` (``<tax>_pose_data.json``
-with pose/metrics/scores), ``--cache-dir`` (normalized-crop cache) and
-``--classes-dir`` (``<name>.class`` stage labels). They mirror the Django layout
-exactly, so pointing the app's ``MOTHS_IMAGE_DIR`` / ``MOTHS_PREDICTION_DIR`` /
-``MOTHS_LABEL_DIR`` / ``MOTHS_THUMBNAIL_DIR`` / ``MOTHS_CLASS_DIR`` at these same
-folders makes the harvest directly browsable.
-Keypoints are stored only in the test dir and pose data only in the labels dir;
+  and kept only when the *minimum* of the relevant scaled 0..1 sub-scores
+  exceeds ``--score-threshold`` (default ``0.5``). Kept images are labelled
+  ``Adult``.
+* **Any other stage** (larva/pupa/egg) – the sample path, routed purely by the
+  iNaturalist Life Stage flag (never the model): no pose prediction; keep up to
+  ``--stage-samples`` images per stage (default 5) and label each with the
+  matching Django stage. Stages with no moth class (nymph, juvenile, subimago)
+  are skipped.
+
+It keeps paging back through observations until it has collected ``--target``
+**top-down** images OR ``--target`` **side-view** images (default 20), or
+iNaturalist runs out. The search stops as soon as *either* target is met
+(stage-sample quotas may end up partially filled). Non-qualifying downloads
+(wrong pose or low score) are deleted so the dataset only gains images that pass.
+
+The data directories come from Django, exactly like the other tools in this
+folder (``ultralytics-predict.py`` etc.): the environment must set every
+``MOTHS_*`` path (no defaults). ``MOTHS_IMAGE_DIR`` holds the photos plus
+``<tax>_observations.json``, ``MOTHS_PREDICTION_DIR`` the predicted keypoint
+``.txt`` files, ``MOTHS_LABEL_DIR`` the ``<tax>_pose_data.json``
+(pose/metrics/scores), ``MOTHS_THUMBNAIL_DIR`` the normalized-crop cache and
+``MOTHS_CLASS_DIR`` the ``<name>.class`` stage labels. Keypoints live only in
+the prediction dir and pose data only in the labels dir;
 ``<tax>_observations.json`` stays pure observation metadata.
+
+Two input modes, both handled in a single process so Django and the three YOLO
+models are loaded once and amortized across every taxon:
+
+* a bare iNaturalist **taxon id** harvests that one taxon;
+* a **CSV path** plus ``--column NAME`` walks that column (each value treated as
+  an iNaturalist taxon id) and harvests each in turn.
+
+In CSV mode, press SPACE to stop cleanly: the current taxon finishes and no
+later taxon is started. The per-taxon audit CSV still gates already-finished
+taxa cheaply (before the models are loaded), so re-running a list only tops up
+what is missing.
 """
 
 from __future__ import annotations
@@ -39,13 +60,17 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Iterator
 
 import requests
+
+import utils_prediction as pred
 
 
 # --- Repo / Django bootstrap -------------------------------------------------
@@ -78,6 +103,104 @@ def import_inat():
     import get_inats_images as inat  # noqa: E402
 
     return inat
+
+
+# --- Clean-stop watcher ------------------------------------------------------
+
+
+class SpaceStopWatcher:
+    """Background watcher that trips a flag when SPACE is pressed.
+
+    Lets the operator ask for a *clean stop* while walking a CSV of taxa: the
+    taxon currently being harvested is never interrupted (it finishes normally),
+    and the caller checks :attr:`requested` between taxa to stop before starting
+    the next one.
+
+    Cross-platform and best-effort: it uses ``msvcrt`` on Windows and
+    ``termios``/``select`` on POSIX. When stdin is not an interactive terminal
+    (e.g. output is redirected) it stays disabled and the batch simply runs to
+    completion.
+    """
+
+    def __init__(self) -> None:
+        self._requested = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._restore = None
+        self.enabled = False
+
+    @property
+    def requested(self) -> bool:
+        return self._requested.is_set()
+
+    def start(self) -> None:
+        if not sys.stdin or not sys.stdin.isatty():
+            return
+        try:
+            import msvcrt  # noqa: F401  (Windows only)
+
+            target = self._run_windows
+        except ImportError:
+            if not self._setup_posix():
+                return
+            target = self._run_posix
+        self.enabled = True
+        self._thread = threading.Thread(target=target, daemon=True)
+        self._thread.start()
+
+    def _trigger(self) -> None:
+        if not self._requested.is_set():
+            self._requested.set()
+            print(
+                "\n[stop] SPACE pressed — will stop cleanly after the current "
+                "taxon finishes.",
+                flush=True,
+            )
+
+    def _run_windows(self) -> None:
+        import msvcrt
+
+        while not self._stop.is_set():
+            while msvcrt.kbhit():
+                if msvcrt.getwch() == " ":
+                    self._trigger()
+            time.sleep(0.05)
+
+    def _setup_posix(self) -> bool:
+        try:
+            import termios
+            import tty
+        except ImportError:
+            return False
+        self._fd = sys.stdin.fileno()
+        try:
+            old = termios.tcgetattr(self._fd)
+        except termios.error:
+            return False
+        tty.setcbreak(self._fd)
+        self._restore = lambda: termios.tcsetattr(
+            self._fd, termios.TCSADRAIN, old
+        )
+        return True
+
+    def _run_posix(self) -> None:
+        import select
+
+        while not self._stop.is_set():
+            ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+            if ready and sys.stdin.read(1) == " ":
+                self._trigger()
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.3)
+        if self._restore is not None:
+            try:
+                self._restore()
+            except Exception:
+                pass
+            self._restore = None
 
 
 # --- Licence filter ----------------------------------------------------------
@@ -278,74 +401,45 @@ def iter_observations(
         time.sleep(0.25)
 
 
-# --- YOLO prediction ---------------------------------------------------------
+# --- Scoring helpers ---------------------------------------------------------
 
 
-def clamp01(value: float) -> float:
-    return max(0.0, min(1.0, value))
+def _fmt(score: float | None) -> str:
+    """Format an optional 0..1 sub-score for the progress line."""
+    return "n/a" if score is None else f"{score:.3f}"
 
 
-def predict_pose_line(
-    model,
-    image_path: Path,
-    imgsz: int,
-    conf: float,
-    device: str,
-    keypoint_conf: float,
-) -> str | None:
-    """Run the model on one image and return a single YOLO-pose label line.
+def side_pixel_span(moth_utils, filename: str) -> float | None:
+    """Largest pixel span among the visible keypoints of a side pose.
 
-    Returns ``None`` when nothing is detected. Only the highest-confidence
-    detection is used (a photo is expected to contain one moth).
+    A side view has only F, B and one wing visible, so the app's
+    ``pose_pixel_span`` (which needs all four keypoints) returns ``None``. Here
+    the span is the biggest pairwise distance among the visible keypoints, in
+    original-image pixels — the side-view analogue of the top-down pixel span.
+    Returns ``None`` when it can't be computed.
     """
-    results = model.predict(
-        source=str(image_path),
-        imgsz=imgsz,
-        conf=conf,
-        max_det=1,
-        device=device,
-        batch=1,
-        stream=False,
-        verbose=False,
-    )
-    result = results[0]
-    if (
-        result.boxes is None
-        or len(result.boxes) == 0
-        or result.keypoints is None
-        or len(result.keypoints) == 0
-    ):
+    annotations, _source = moth_utils.load_pose_source(filename)
+    if not annotations:
         return None
-
-    index = int(result.boxes.conf.argmax().item())
-    class_id = int(result.boxes.cls[index].item())
-    cx, cy, width, height = result.boxes.xywhn[index].detach().cpu().tolist()
-
-    values = [
-        str(class_id),
-        f"{clamp01(float(cx)):.6f}",
-        f"{clamp01(float(cy)):.6f}",
-        f"{clamp01(float(width)):.6f}",
-        f"{clamp01(float(height)):.6f}",
+    keypoints = annotations[0].keypoints
+    if len(keypoints) < 4:
+        return None
+    size = moth_utils.get_image_size(filename)
+    if size is None:
+        return None
+    width, height = size
+    pts = [
+        (kp.x * width, kp.y * height)
+        for kp in keypoints[:4]
+        if kp.visibility > 0
     ]
-
-    keypoints_xy = result.keypoints.xyn[index].detach().cpu().tolist()
-    kp_conf_values = None
-    if result.keypoints.conf is not None:
-        kp_conf_values = result.keypoints.conf[index].detach().cpu().tolist()
-
-    for kp_index, (x, y) in enumerate(keypoints_xy):
-        if kp_conf_values is None:
-            visibility = 2
-        else:
-            visibility = 2 if float(kp_conf_values[kp_index]) >= keypoint_conf else 0
-        if visibility == 0:
-            x = y = 0.0
-        values.extend(
-            [f"{clamp01(float(x)):.6f}", f"{clamp01(float(y)):.6f}", str(visibility)]
-        )
-
-    return " ".join(values)
+    if len(pts) < 2:
+        return None
+    span = 0.0
+    for i in range(len(pts)):
+        for j in range(i + 1, len(pts)):
+            span = max(span, math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]))
+    return span
 
 
 # --- Cleanup -----------------------------------------------------------------
@@ -353,8 +447,11 @@ def predict_pose_line(
 
 def discard(moth_utils, image_path: Path, filename: str) -> None:
     """Remove a rejected download and its derived files from the dataset."""
-    prediction_path = moth_utils.get_prediction_path(filename)
-    for path in (image_path, prediction_path):
+    for path in (
+        image_path,
+        moth_utils.get_prediction_path(filename),
+        moth_utils.get_prediction_class_path(filename),
+    ):
         try:
             path.unlink()
         except OSError:
@@ -385,20 +482,54 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Download, predict and score iNaturalist photos for a taxon, "
-            "keeping only the best top-down images."
+            "keeping only the best top-down and side-view images (via the same "
+            "3-model prediction scheme as ultralytics-predict.py)."
         )
     )
-    parser.add_argument("taxon_id", type=int, help="iNaturalist taxon ID")
     parser.add_argument(
-        "model",
+        "taxon",
+        help=(
+            "iNaturalist taxon id to harvest, OR a path to a CSV file whose "
+            "--column holds taxon ids (each is harvested in turn)."
+        ),
+    )
+    parser.add_argument(
+        "--column",
+        default=None,
+        help=(
+            "When the positional argument is a CSV file, the name of the "
+            "column holding iNaturalist taxon ids."
+        ),
+    )
+    parser.add_argument(
+        "--classification-model",
+        dest="cls_model",
         type=Path,
-        help="Path to the trained YOLO pose model (e.g. .../weights/best.pt)",
+        required=True,
+        help="Box-only viewpoint/stage classification model (.pt).",
+    )
+    parser.add_argument(
+        "--pose-model",
+        dest="pose_model",
+        type=Path,
+        required=True,
+        help="General F/L/R/B pose model (.pt).",
+    )
+    parser.add_argument(
+        "--side-model",
+        dest="side_model",
+        type=Path,
+        required=True,
+        help="Side-view pose model (F, B, wing; class encodes L/R) (.pt).",
     )
     parser.add_argument(
         "--target",
         type=int,
         default=20,
-        help="Stop once this many qualifying images are kept (default: 20).",
+        help=(
+            "Stop once this many top-down OR this many side-view images are "
+            "kept (default: 20 each; whichever is reached first)."
+        ),
     )
     parser.add_argument(
         "--per-page",
@@ -411,57 +542,9 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.5,
         help=(
-            "Minimum for EACH scaled sub-score (symmetry, pixels, sharpness); "
-            "an image is kept only when all three exceed it (default: 0.5)."
-        ),
-    )
-    # Data directories are passed explicitly (never taken from settings.py) so
-    # a harvest can target its own tree. They mirror the Django layout exactly,
-    # so pointing the app's settings at the same four dirs makes the result
-    # directly browsable.
-    parser.add_argument(
-        "--images-dir",
-        type=Path,
-        required=True,
-        help=(
-            "Images root (photos in <images-dir>/<taxon_id>/ and "
-            "<taxon_id>_observations.json at the root). Maps to MOTHS_IMAGE_DIR."
-        ),
-    )
-    parser.add_argument(
-        "--test-dir",
-        type=Path,
-        required=True,
-        help=(
-            "Prediction (tested keypoints) root: one YOLO-pose <name>.txt per "
-            "image under <test-dir>/<taxon_id>/. Maps to MOTHS_PREDICTION_DIR."
-        ),
-    )
-    parser.add_argument(
-        "--labels-dir",
-        type=Path,
-        required=True,
-        help=(
-            "Labels root holding <taxon_id>_pose_data.json (pose class, metrics "
-            "and scores). Maps to MOTHS_LABEL_DIR."
-        ),
-    )
-    parser.add_argument(
-        "--cache-dir",
-        type=Path,
-        required=True,
-        help=(
-            "Thumbnail/normalized-crop cache root (needed to score sharpness). "
-            "Maps to MOTHS_THUMBNAIL_DIR."
-        ),
-    )
-    parser.add_argument(
-        "--classes-dir",
-        type=Path,
-        required=True,
-        help=(
-            "Stage-classification root: one <name>.class per image under "
-            "<classes-dir>/<taxon_id>/. Maps to MOTHS_CLASS_DIR."
+            "Minimum scaled sub-score to keep an image: top-down needs "
+            "min(symmetry, pixels, sharpness) to exceed it; side view needs "
+            "min(pixels, sharpness) (symmetry undefined). Default: 0.5."
         ),
     )
     parser.add_argument(
@@ -481,13 +564,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--imgsz", type=int, default=768, help="Inference image size.")
     parser.add_argument(
-        "--conf", type=float, default=0.10, help="Minimum detection confidence."
-    )
-    parser.add_argument(
-        "--keypoint-conf",
-        type=float,
-        default=0.0,
-        help="Keypoints below this confidence are written with visibility 0.",
+        "--conf", type=float, default=0.10, help="Minimum detection (box) confidence."
     )
     parser.add_argument(
         "--device", default="0", help="Inference device: 0, 1, cpu, etc."
@@ -501,54 +578,127 @@ def parse_args() -> argparse.Namespace:
             "(default: 250; 0 = no cap)."
         ),
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Re-run a tax that was already processed. Images already kept "
+            "(CSV 'taken' rows) are preserved and counted toward the quotas; "
+            "the search then starts over for every other observation (skipping "
+            "the already-taken ones). The audit CSV is rewritten keeping only "
+            "the 'taken' rows, with fresh outcomes appended by the re-run."
+        ),
+    )
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
+def make_model_loader(args):
+    """Return a lazy loader that builds the three YOLO models once, on demand.
 
-    if not args.model.exists():
-        raise SystemExit(f"Model does not exist: {args.model}")
+    Importing ultralytics pulls in torch and loading each model costs several
+    seconds, so the load is deferred until a taxon actually reaches the
+    download/predict stage. In a CSV batch, taxa already finished (skipped on
+    their audit-CSV startup gate) never trigger it; the first taxon that needs
+    the models pays the cost and every later one reuses the same instances.
+    """
+    cache: dict[str, Any] = {}
 
-    # The Django settings module requires every data path via the environment
-    # (no defaults). Feed it the explicitly-passed args before bootstrapping so
-    # the whole flow (download, prediction, scoring) works on this same tree.
-    os.environ["MOTHS_IMAGE_DIR"] = str(args.images_dir)
-    os.environ["MOTHS_PREDICTION_DIR"] = str(args.test_dir)
-    # No human labels exist in a harvest, so this (label-free) labels dir doubles
-    # as the pose source and load_pose_source falls back to predictions.
-    os.environ["MOTHS_LABEL_DIR"] = str(args.labels_dir)
-    os.environ["MOTHS_THUMBNAIL_DIR"] = str(args.cache_dir)
-    os.environ["MOTHS_CLASS_DIR"] = str(args.classes_dir)
-    # Not used by the harvest, but the settings module still requires it;
-    # point at a (typically absent) file under the labels dir so imports succeed.
-    os.environ.setdefault("TAX_CSV", str(args.labels_dir / "names.csv"))
+    def load():
+        if not cache:
+            from ultralytics import YOLO
 
-    moth_utils = bootstrap_django()
-    inat = import_inat()
+            print(f"Loading classification model: {args.cls_model}")
+            print(f"Loading pose model:           {args.pose_model}")
+            print(f"Loading side-view pose model: {args.side_model}")
+            cache["models"] = {
+                "cls": YOLO(str(args.cls_model)),
+                "pose": YOLO(str(args.pose_model)),
+                "side": YOLO(str(args.side_model)),
+            }
+        return cache["models"]
 
-    taxon_id = args.taxon_id
+    return load
+
+
+def iter_taxon_ids(target: str, column: str | None) -> Iterator[str]:
+    """Yield taxon-id strings from either a single id or a CSV column.
+
+    ``target`` is either a path to an existing CSV file — then ``column`` names
+    the taxon-id column and every non-empty value is yielded, in file order — or
+    a single taxon id, yielded on its own.
+    """
+    path = Path(target)
+    if path.is_file():
+        if not column:
+            raise SystemExit(
+                "A CSV file was given; use --column NAME to pick the taxon-id "
+                "column."
+            )
+        with open(path, newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames is None or column not in reader.fieldnames:
+                available = ", ".join(reader.fieldnames or [])
+                raise SystemExit(
+                    f"Column {column!r} not found. Available columns: {available}"
+                )
+            for row in reader:
+                value = (row.get(column) or "").strip()
+                if value:
+                    yield value
+    else:
+        value = target.strip()
+        if value:
+            yield value
+
+
+def run_taxon(taxon_id, args, moth_utils, inat, session, load_models) -> None:
+    """Harvest a single taxon: download, predict, score, log and cache.
+
+    Uses the already-bootstrapped Django ``moth_utils``, the shared iNaturalist
+    ``session`` and the lazy ``load_models`` loader (so the models are only built
+    the first time any taxon reaches the prediction stage). The audit-CSV
+    startup gate can return early (already finished / corrupted) before the
+    models are ever loaded.
+    """
     tax = str(taxon_id)
 
     csv_path = moth_utils.get_image_dir() / f"{tax}_observations_list.csv"
+
+    # ``taken_ids`` are observations kept by a previous run (force only); the
+    # CSV rewrite in ``finally`` starts from these preserved rows. Empty for a
+    # fresh tax or a plain (non-force) run.
+    taken_ids: set[str] = set()
+    csv_base_index: dict[str, dict[str, str]] = {}
 
     # Startup gate on the audit CSV. If the tax was already finished (any
     # terminal marker present) we skip it entirely. If the CSV exists without a
     # terminal marker, a previous run was interrupted (Ctrl-C): flag it
     # ``corrupted`` and skip, leaving it for manual inspection.
+    #
+    # With ``--force`` an already-processed tax is instead re-run: the CSV's
+    # ``taken`` rows are preserved (every other row and the terminal marker are
+    # dropped) and their images are kept and counted toward the quotas, while
+    # the search starts over for all other observations.
     if csv_path.is_file():
-        termination = csv_termination_status(csv_path)
-        if termination is not None:
-            print(f"Tax {tax} already processed ({termination}); skipping.")
+        if not args.force:
+            termination = csv_termination_status(csv_path)
+            if termination is not None:
+                print(f"Tax {tax} already processed ({termination}); skipping.")
+                return
+            append_termination(csv_path, "corrupted")
+            print(
+                f"Tax {tax} has an unfinished previous run; marked 'corrupted' "
+                f"and skipping."
+            )
             return
-        append_termination(csv_path, "corrupted")
+        for obs_id, row in load_csv_index(csv_path).items():
+            if (row.get("status") or "").strip() == "taken":
+                taken_ids.add(obs_id)
+                csv_base_index[obs_id] = row
         print(
-            f"Tax {tax} has an unfinished previous run; marked 'corrupted' "
-            f"and skipping."
+            f"Force re-run for tax {tax}: preserving {len(taken_ids)} taken "
+            f"image(s); re-examining all other observations."
         )
-        return
-
-    from ultralytics import YOLO
 
     image_directory = moth_utils.get_image_dir() / tax
     image_directory.mkdir(parents=True, exist_ok=True)
@@ -561,13 +711,52 @@ def main() -> None:
         if item.get("observation_id") is not None
     }
 
-    session = inat.create_session()
-    print(f"Loading model: {args.model}")
-    model = YOLO(str(args.model))
+    # Heavy initialization is deferred until AFTER the CSV startup gate above:
+    # importing ultralytics pulls in torch and loading the three YOLO models
+    # costs several seconds each. Skipped (already-finished) taxa never reach
+    # here, so the models load only when there is real work to do; ``load_models``
+    # caches them so every later taxon in a CSV batch reuses the same instances.
+    models = load_models()
 
-    kept_items: list[dict[str, Any]] = []          # adult top-down pose images
+    top_down_items: list[dict[str, Any]] = []       # adult top-down pose images
+    side_items: list[dict[str, Any]] = []           # adult side-view pose images
     stage_items: list[dict[str, Any]] = []          # non-adult stage samples
     stage_counts = {stage: 0 for stage in LIFE_STAGE_TO_STAGE.values()}
+
+    # Force re-run: never touch images already on disk. EVERY observation that
+    # already has an image is excluded from the search, so it is neither
+    # re-downloaded nor ever passed to ``discard`` — guaranteeing no existing
+    # image is deleted or overwritten. Those images also count toward the quotas
+    # (``base_top_down`` / ``base_side`` for adult poses, ``stage_counts`` for
+    # stage samples) so the re-run only tops them up. Taken CSV rows are added
+    # too, defensively, in case an image is missing on disk.
+    base_top_down = 0
+    base_side = 0
+    if args.force:
+        for obs_id in taken_ids:
+            try:
+                existing_ids.add(int(obs_id))
+            except ValueError:
+                existing_ids.add(obs_id)
+        for image in moth_utils.scan_tax_images(tax):
+            try:
+                existing_ids.add(int(image.obs_id))
+            except (TypeError, ValueError):
+                existing_ids.add(image.obs_id)
+            stage = moth_utils.get_image_class(image.filename)
+            if stage in stage_counts:
+                stage_counts[stage] += 1
+            elif stage == "Adult":
+                pose = moth_utils.classify_pose(image.filename)
+                if pose == moth_utils.POSE_TOP_DOWN:
+                    base_top_down += 1
+                elif pose == moth_utils.POSE_SIDE:
+                    base_side += 1
+        print(
+            f"  preserved on disk: top-down={base_top_down}, side={base_side}, "
+            + ", ".join(f"{s}={c}" for s, c in stage_counts.items())
+        )
+
     examined = 0
     downloaded = 0
     rejected_license = 0
@@ -577,10 +766,17 @@ def main() -> None:
     rejected_stage_full = 0   # non-adult but its category quota is already full
     rejected_stage_other = 0  # non-adult stage with no matching moth class
 
+    def targets_met() -> bool:
+        return (
+            base_top_down + len(top_down_items) >= args.target
+            or base_side + len(side_items) >= args.target
+        )
+
     print(
-        f"Harvesting up to {args.target} top-down images for taxon {taxon_id} "
-        f"(each sub-score > {args.score_threshold}); up to {args.stage_samples} "
-        f"samples per non-adult stage"
+        f"Harvesting up to {args.target} top-down OR {args.target} side-view "
+        f"images for taxon {taxon_id} (kept when the minimum relevant sub-score "
+        f"> {args.score_threshold}); up to {args.stage_samples} samples per "
+        f"non-adult stage"
     )
 
     # A single dropped image prints one dot (no newline) so progress is visible
@@ -590,7 +786,8 @@ def main() -> None:
 
     def dropped(mark: str = ".") -> None:
         # Progress marks by reason: c=non-CC licence, q=non-adult quota full,
-        # -=no pose detected, /=not top-down, b=failed score, .=other.
+        # -=no pose detected, /=wrong pose (not top-down/side), b=failed score,
+        # .=other.
         nonlocal progress_open
         print(mark, end="", flush=True)
         progress_open = True
@@ -624,7 +821,7 @@ def main() -> None:
         for observation in iter_observations(
             inat, session, taxon_id, args.per_page, existing_ids
         ):
-            if len(kept_items) >= args.target:
+            if targets_met():
                 break
             if args.max_observations and examined >= args.max_observations:
                 newline_if_needed()
@@ -705,45 +902,95 @@ def main() -> None:
             downloaded += 1
             filename = dest.name
 
-            line = predict_pose_line(
-                model=model,
-                image_path=dest,
-                imgsz=args.imgsz,
-                conf=args.conf,
-                device=args.device,
-                keypoint_conf=args.keypoint_conf,
-            )
-            if line is None:
+            # --- Three-model prediction scheme (shared: utils_prediction).
+            # Classify the viewpoint first; only top-down (pinned or not) and
+            # side-view specimens are harvest targets, so non-targets are
+            # rejected before running any (expensive) pose model.
+            classification = pred.classify_top(models, dest, args)
+            if classification is None:
                 no_prediction += 1
                 discard(moth_utils, dest, filename)
                 log_status(observation, "rejected_no_pose")
                 dropped("-")
                 continue
+            cls_id = classification.cls_id
 
-            prediction_path = moth_utils.get_prediction_path(filename)
-            prediction_path.parent.mkdir(parents=True, exist_ok=True)
-            prediction_path.write_text(line + "\n", encoding="utf-8")
-
-            if moth_utils.classify_pose(filename) != moth_utils.POSE_TOP_DOWN:
+            if cls_id in pred.CLS_TOP_DOWN_ANY:
+                category = "top_down"
+            elif cls_id == pred.CLS_SIDE_VIEW:
+                category = "side"
+            else:
+                # bottom-up / unclear / macro / larva: not a harvest target.
                 rejected_pose += 1
                 discard(moth_utils, dest, filename)
                 log_status(observation, "rejected_not_top_down")
                 dropped("/")
                 continue
 
+            # Run the matching pose model(s) via the shared pipeline step, then
+            # write the label + .class sidecars exactly as ultralytics-predict.
+            status, box, keypoints = pred.predict_pose_for_class(
+                models, dest, args, cls_id, moth_utils
+            )
+            if keypoints is None:
+                no_prediction += 1
+                discard(moth_utils, dest, filename)
+                log_status(observation, "rejected_no_pose")
+                dropped("-")
+                continue
+
+            prediction = pred.Prediction(
+                status=status,
+                classification=classification,
+                box=box,
+                keypoints=keypoints,
+            )
+            pred.write_prediction(
+                prediction,
+                moth_utils.get_prediction_path(filename),
+                moth_utils.get_prediction_class_path(filename),
+                moth_utils,
+            )
+
+            # The visibility rules may downgrade a geometry that disagrees with
+            # the classification to ``unclear``; confirm the pose really is the
+            # target category before scoring.
+            actual_pose = moth_utils.classify_pose(filename)
             row = moth_utils.compute_pose_row(filename)
-            s_sym, s_pixels, s_sharp = moth_utils.score_components(
-                row["symmetry"], row["pixel_span"], row["sharpness"]
-            )
-            passed = (
-                s_sym is not None
-                and s_pixels is not None
-                and s_sharp is not None
-                and s_sym > args.score_threshold
-                and s_pixels > args.score_threshold
-                and s_sharp > args.score_threshold
-            )
-            if not passed:
+
+            if category == "top_down":
+                if actual_pose != moth_utils.POSE_TOP_DOWN:
+                    rejected_pose += 1
+                    discard(moth_utils, dest, filename)
+                    log_status(observation, "rejected_not_top_down")
+                    dropped("/")
+                    continue
+                # Top-down uses all three sub-scores.
+                s_sym, s_pixels, s_sharp = moth_utils.score_components(
+                    row["symmetry"], row["pixel_span"], row["sharpness"]
+                )
+                sub_scores = [s_sym, s_pixels, s_sharp]
+                metric_text = (
+                    f"sym={_fmt(s_sym)} pix={_fmt(s_pixels)} sharp={_fmt(s_sharp)}"
+                )
+            else:  # side
+                if actual_pose != moth_utils.POSE_SIDE:
+                    rejected_pose += 1
+                    discard(moth_utils, dest, filename)
+                    log_status(observation, "rejected_not_top_down")
+                    dropped("/")
+                    continue
+                # Side view has one wing, so symmetry is undefined; score on the
+                # pixel span (of the visible keypoints) and sharpness only.
+                _s_sym, s_pixels, s_sharp = moth_utils.score_components(
+                    None, side_pixel_span(moth_utils, filename), row["sharpness"]
+                )
+                sub_scores = [s_pixels, s_sharp]
+                metric_text = f"pix={_fmt(s_pixels)} sharp={_fmt(s_sharp)}"
+
+            if any(score is None for score in sub_scores) or (
+                min(sub_scores) <= args.score_threshold
+            ):
                 rejected_score += 1
                 discard(moth_utils, dest, filename)
                 log_status(observation, "rejected_low_score")
@@ -751,25 +998,31 @@ def main() -> None:
                 continue
 
             newline_if_needed()
-            # A predicted top-down specimen is an adult; label it accordingly.
+            # A kept top-down/side specimen is an adult; label it accordingly.
             moth_utils.set_image_class(filename, "Adult")
             # observations.json stays pure observation metadata; the pose/
             # metrics/keypoints live in the prediction .txt (test dir) and
             # {tax}_pose_data.json (labels dir), matching the Django layout.
-            kept_items.append(item)
+            if category == "top_down":
+                top_down_items.append(item)
+                progress = (
+                    f"top-down {base_top_down + len(top_down_items):02d}/"
+                    f"{args.target}"
+                )
+            else:
+                side_items.append(item)
+                progress = f"side {base_side + len(side_items):02d}/{args.target}"
             log_status(observation, "taken")
             print(
-                f"  [{len(kept_items):02d}/{args.target}] kept obs "
-                f"{item['observation_id']} ({filename}) "
-                f"sym={s_sym:.3f} pix={s_pixels:.3f} sharp={s_sharp:.3f} "
-                f"score={row['score']:.3f}"
+                f"  [{progress}] kept obs {item['observation_id']} "
+                f"({filename}) {metric_text}"
             )
     finally:
         newline_if_needed()
         # Persist kept observation metadata (merged, newest first) so the site
         # has licence/quality info for the harvested images — both the adult
         # pose images and the non-adult stage samples.
-        new_items = kept_items + stage_items
+        new_items = top_down_items + side_items + stage_items
         if new_items:
             merged = existing_items + new_items
             merged.sort(key=inat.sort_key, reverse=True)
@@ -778,11 +1031,12 @@ def main() -> None:
                 encoding="utf-8",
             )
 
-        # Persist the per-observation audit log, merging with any prior run so
-        # the CSV grows into a complete record of every observation checked.
-        # Always written (even with no rows) so the file's presence signals the
-        # tax_id has at least been looked at.
-        index = load_csv_index(csv_path)
+        # Persist the per-observation audit log. A fresh run starts empty; a
+        # force re-run starts from the preserved ``taken`` rows only (all other
+        # prior rows and the terminal marker are dropped). Both then overlay the
+        # outcomes recorded this run. Always written (even with no rows) so the
+        # file's presence signals the tax_id has at least been looked at.
+        index = dict(csv_base_index)
         for record in records:
             index[record["observation_id"]] = record
         rows = sorted(
@@ -801,13 +1055,16 @@ def main() -> None:
     # <labels-dir>/<tax>_pose_data.json (version + per-image rows) and the
     # normalized crops in the cache dir, in the exact format Django expects.
     # Stage samples have no prediction, so they simply record pose "none".
-    if kept_items or stage_items:
+    if top_down_items or side_items or stage_items:
         moth_utils.build_pose_data(tax, moth_utils.scan_tax_images(tax))
-        print(f"Pose data:             {moth_utils.get_pose_data_path(tax)}")
+
+    # Effective totals include images preserved from a previous run (force).
+    total_top_down = base_top_down + len(top_down_items)
+    total_side = base_side + len(side_items)
 
     # Terminal marker — the very last thing written, only reached on a clean
     # finish. Its absence is how a re-run detects an interrupted (Ctrl-C) run.
-    if len(kept_items) >= args.target:
+    if total_top_down >= args.target or total_side >= args.target:
         termination = "done"
     elif hit_scan_limit:
         termination = "reached_scan_limit"
@@ -815,28 +1072,90 @@ def main() -> None:
         termination = "no_more_observations"
     append_termination(csv_path, termination)
 
+    # On a force re-run, note the preserved counts alongside the new ones.
+    def _kept(total: int, new: int) -> str:
+        return f"{total}" + (f" (+{new} new)" if base_top_down or base_side else "")
+
     print()
     print(f"Examined observations: {examined}")
     print(f"Downloaded:            {downloaded}")
     print(f"Rejected (licence):    {rejected_license}")
     print(f"Rejected (no pose):    {no_prediction}")
-    print(f"Rejected (not top-down): {rejected_pose}")
+    print(f"Rejected (wrong pose): {rejected_pose}")
     print(f"Rejected (low score):  {rejected_score}")
     print(f"Rejected (stage full): {rejected_stage_full}")
     print(f"Rejected (stage n/a):  {rejected_stage_other}")
-    print(f"Kept (adult pose):     {len(kept_items)}")
+    print(f"Kept (top-down):       {_kept(total_top_down, len(top_down_items))}")
+    print(f"Kept (side view):      {_kept(total_side, len(side_items))}")
     stage_summary = ", ".join(
         f"{stage}={count}" for stage, count in stage_counts.items()
     )
-    print(f"Kept (stage samples):  {len(stage_items)} ({stage_summary})")
-    if len(kept_items) < args.target:
-        print("Ran out of observations before reaching the pose target.")
-    print(f"Images directory:      {image_directory}")
-    print(f"Classes directory:     {moth_utils.get_class_dir() / tax}")
-    print(f"Observations log:      {csv_path}")
-    print(f"Predictions directory: {moth_utils.get_prediction_dir() / tax}")
-    print(f"Labels directory:      {moth_utils.get_label_dir()}")
-    print(f"Cache directory:       {moth_utils.get_thumbnail_dir()}")
+    print(f"Kept (stage samples):  {stage_summary}")
+    if total_top_down < args.target and total_side < args.target:
+        print("Ran out of observations before reaching either pose target.")
+
+
+def main() -> None:
+    args = parse_args()
+
+    for label, model_path in (
+        ("classification", args.cls_model),
+        ("pose", args.pose_model),
+        ("side", args.side_model),
+    ):
+        if not model_path.exists():
+            raise SystemExit(f"{label} model does not exist: {model_path}")
+
+    # Directories come from the environment via Django settings (every MOTHS_*
+    # path must be set, no defaults), exactly like the other tools here.
+    moth_utils = bootstrap_django()
+    inat = import_inat()
+    session = inat.create_session()
+    load_models = make_model_loader(args)
+
+    # Clean-stop watcher: pressing SPACE lets the current taxon finish, then
+    # stops before the next one. Only meaningful when walking a CSV of many
+    # taxa; harmless for a single taxon.
+    watcher = SpaceStopWatcher()
+    watcher.start()
+    if watcher.enabled:
+        print(
+            "Press SPACE at any time to stop cleanly after the current taxon "
+            "finishes."
+        )
+
+    # Materialize the list up front so each caption can show "N of M".
+    taxon_ids = list(iter_taxon_ids(args.taxon, args.column))
+    total = len(taxon_ids)
+
+    processed = 0
+    stopped_early = False
+    try:
+        for index, raw_id in enumerate(taxon_ids, start=1):
+            # Honor a SPACE press before starting the next taxon.
+            if watcher.requested:
+                stopped_early = True
+                print(
+                    f"[stop] Clean stop requested — not starting taxon "
+                    f"{raw_id} or any later ones."
+                )
+                break
+            try:
+                taxon_id = int(raw_id)
+            except ValueError:
+                print(f"Skipping non-numeric taxon id: {raw_id!r}")
+                continue
+            print()
+            print(f"=== [{index} of {total}]: tax {taxon_id} ===")
+            run_taxon(taxon_id, args, moth_utils, inat, session, load_models)
+            processed += 1
+    finally:
+        watcher.close()
+
+    print()
+    print(f"Taxa processed: {processed}")
+    if stopped_early:
+        print("Stopped early on user request (SPACE).")
 
 
 if __name__ == "__main__":

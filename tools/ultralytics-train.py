@@ -1,7 +1,37 @@
+import argparse
+from pathlib import Path
+
 from ultralytics import YOLO
 
-#model = YOLO("yolo11n-pose.pt")
-model = YOLO("yolo26s-pose.pt")
+parser = argparse.ArgumentParser(description="Train a YOLO model.")
+parser.add_argument(
+    "model",
+    help="Model file to start from, e.g. yolo26s-pose.pt / yolo26s.pt",
+)
+parser.add_argument(
+    "--config",
+    default="yolo26s-pose.yaml",
+    help="Model architecture YAML to build, e.g. yolo26s-pose.yaml / yolo26s.yaml",
+)
+parser.add_argument(
+    "--project",
+    default="pose_classification",
+    help=(
+        "Output parent directory (results go in <project>/<name>)."
+    ),
+)
+parser.add_argument(
+    "--name",
+    default="init",
+    help="Run subfolder inside --project (default: initial).",
+)
+args = parser.parse_args()
+
+model = YOLO(args.config)
+model.load(args.model)
+
+# Absolute path avoids Ultralytics prepending its default runs/<task> dir.
+project = str(Path(args.project).resolve())
 
 model.train(
     data="data.yaml",
@@ -24,6 +54,6 @@ model.train(
     flipud=0.0,
     mosaic=0.0,
     mixup=0.0,
-    project="runs/moth_pose",
-    name="initial",
+    project=project,
+    name=args.name,
 )

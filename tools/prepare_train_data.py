@@ -15,9 +15,10 @@ the output directory:
 
 ``side_view_poses.zip`` — a YOLO **pose** dataset restricted to side-view images,
 whose labels keep only 3 keypoints: F, B and whichever single wing (L or R) is
-present::
+present. The class encodes the visible wing side (0 side_view_l / 1
+side_view_r); direction is deciphered from the class downstream::
 
-    data.yaml                           pose task config (kpt_shape [3,3])
+    data.yaml                           pose task config (kpt_shape [3,3], 2 classes)
     train.txt / val.txt                 image lists (same split as above)
     data/<labels>/<tax_id>/<name>.txt   ``<class> <box> F B wing`` lines
 
@@ -29,13 +30,13 @@ plus two per-image flag overrides::
     train.txt / val.txt                 image lists (same split as above)
     data/<labels>/<tax_id>/<name>.txt   ``<class> <cx> <cy> <w> <h>`` lines
 
-    class ids:  0 top_down · 1 side_view_l · 2 side_view_r · 3 bottom_up
-                4 unclear_pose · 5 top_down_pinned · 6 macro
+    class ids:  0 top_down · 1 side_view · 2 bottom_up · 3 unclear_pose
+                4 top_down_pinned · 5 macro · 6 larva
 
-    A side view splits into side_view_l / side_view_r by the present wing;
     Adult + top-down + Pinned -> top_down_pinned (instead of top_down);
-    Adult + Macro -> macro. Images flagged Damaged are excluded from BOTH
-    archives (and from the train/val split).
+    Adult + Macro -> macro; any Larva-staged image (a box drawn without
+    keypoints) -> larva. Images flagged Damaged, Traces or Mating are excluded
+    from BOTH archives (and from the train/val split).
 
 Images are assumed to already exist next to each archive at
 ``data/<images>/<tax_id>/<name>.<ext>`` (they are *not* copied into the zips).
@@ -71,18 +72,28 @@ SIDE_POSE_ARCHIVE_NAME = "side_view_poses.zip"
 DATA_ROOT = "data"
 
 # Class order for the box-only classification dataset. The first four are the
-# viewpoints from moths.utils.classify_annotation; the last two are derived from
-# the per-image flags: an Adult top-down that is Pinned becomes ``top_down_pinned``
-# (instead of ``top_down``), and any Adult flagged Macro becomes ``macro``.
-# Images flagged Damaged are excluded from both archives entirely.
+# adult viewpoints from moths.utils.classify_annotation; the next two are derived
+# from the per-image flags: an Adult top-down that is Pinned becomes
+# ``top_down_pinned`` (instead of ``top_down``), and any Adult flagged Macro
+# becomes ``macro``. ``larva`` is stage-based: any Larva-staged image (its label
+# is a box drawn without keypoints) is classified ``larva`` regardless of pose.
+# Images flagged Damaged, Traces or Mating are excluded from both archives entirely.
 CLASSIFICATION_NAMES = [
     "top_down",
-    "side_view_l",
-    "side_view_r",
+    "side_view",
     "bottom_up",
     "unclear_pose",
     "top_down_pinned",
     "macro",
+    "larva",
+]
+
+# Class order for the side-view pose dataset. The class encodes which wing is
+# visible (the third keypoint); the direction (facing L vs R) is deciphered from
+# the class downstream. Keypoints are always F, B, wing in that order.
+SIDE_POSE_NAMES = [
+    "side_view_l",  # 0 — F, B, L wing
+    "side_view_r",  # 1 — F, B, R wing
 ]
 
 
@@ -139,8 +150,9 @@ def collect_documented(moth_utils) -> list[tuple]:
     A "documented pose" is an image with a non-empty label file (at least one
     parseable YOLO-pose annotation). Iterating the images (not the label files)
     guarantees every entry points at a real, still-present image. ``stage`` /
-    ``flags`` come from the ``<name>.class`` file. Images flagged ``Damaged`` are
-    dropped here, so they never reach either archive (or the train/val split).
+    ``flags`` come from the ``<name>.class`` file. Images flagged ``Damaged``,
+    ``Traces`` or ``Mating`` are dropped here, so they never reach either archive
+    (or the train/val split).
     """
     documented: list[tuple] = []
     tax_ids = moth_utils.list_tax_ids()
@@ -155,7 +167,9 @@ def collect_documented(moth_utils) -> list[tuple]:
             if not annotations:
                 continue
             stage, flags = moth_utils.get_class_and_flags(image.filename)
-            if "Damaged" in flags:  # excluded from all training data
+            # Flags marked non-trainable in the flag table (Damaged / Traces /
+            # Mating) exclude the image from all training data.
+            if moth_utils.flags_block_training(flags):
                 continue
             documented.append(
                 (tax_id, image.filename, label_path, annotations, stage, flags)
@@ -197,14 +211,19 @@ def _pose_yaml() -> str:
 
 def _side_pose_yaml() -> str:
     return (
-        "# YOLO pose dataset — side view: F, B and the one present wing (L or R).\n"
+        "# YOLO pose dataset — side view. Class encodes the visible wing side:\n"
+        "#   0 side_view_l (F, B, L wing) · 1 side_view_r (F, B, R wing).\n"
+        "# The 3 keypoints are always F, B, wing in that order. NOTE: since the\n"
+        "# class carries the L/R direction, disable horizontal flip augmentation\n"
+        "# (fliplr=0.0) when training — a flip mirrors L<->R but not the class.\n"
         "path: .\n"
         "train: train.txt\n"
         "val: val.txt\n"
         "kpt_shape: [3, 3]  # 3 keypoints (F, B, wing), each x/y/visibility\n"
-        "flip_idx: [0, 1, 2]  # horizontal flip keeps the F/B/wing slots\n"
+        "flip_idx: [0, 1, 2]  # keypoint slots unchanged (see fliplr note above)\n"
         "names:\n"
-        "  0: moth\n"
+        "  0: side_view_l\n"
+        "  1: side_view_r\n"
     )
 
 
@@ -257,7 +276,8 @@ def build_pose_archive(
     Only keypoint-bearing lines are emitted (see :func:`_pose_label_lines`);
     images left with no such line (e.g. box-only labels) are skipped entirely —
     no label file and no image-list entry — so every listed image has keypoints.
-    (Damaged-flagged images were already dropped in :func:`collect_documented`.)
+    (Damaged/Traces/Mating-flagged images were already dropped in
+    :func:`collect_documented`.)
     """
     train_lines: list[str] = []
     val_lines: list[str] = []
@@ -287,16 +307,20 @@ def _side_pose_label_lines(annotations, classify, pose_side) -> list[str]:
 
     Only annotations that classify as a side view are kept; each emits exactly
     three keypoints — F, B and whichever single wing (L or R) is present — in
-    that fixed order (``kpt_shape [3, 3]``). Class is always ``0`` (moth).
+    that fixed order (``kpt_shape [3, 3]``). The class encodes the visible wing:
+    ``0`` (side_view_l) when L is present, ``1`` (side_view_r) when R is.
     """
     lines: list[str] = []
     for a in annotations:
         if len(a.keypoints) != 4 or classify(a) != pose_side:
             continue
         front, left, right, back = a.keypoints
-        wing = left if left.visibility > 0 else right
+        if left.visibility > 0:
+            class_id, wing = 0, left   # side_view_l
+        else:
+            class_id, wing = 1, right  # side_view_r
         parts = [
-            "0",
+            str(class_id),
             f"{a.cx:.6f}",
             f"{a.cy:.6f}",
             f"{a.width:.6f}",
@@ -316,14 +340,17 @@ def build_side_pose_archive(
     labels_component: str,
     classify,
     pose_side,
-) -> tuple[int, int]:
-    """Write the side-view pose archive (F/B/wing); return ``(train, val)``.
+) -> tuple[int, int, dict[int, int]]:
+    """Write the side-view pose archive (F/B/wing); return ``(train, val, per_class)``.
 
     Only images with at least one side-view annotation are listed; each label
     holds the 3-keypoint side lines (see :func:`_side_pose_label_lines`).
+    ``per_class`` tallies the emitted objects by class (0 side_view_l / 1
+    side_view_r).
     """
     train_lines: list[str] = []
     val_lines: list[str] = []
+    per_class: dict[int, int] = defaultdict(int)
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
         for i, (tax_id, filename, _label_path, anns, _stage, _flags) in enumerate(
             documented
@@ -331,6 +358,8 @@ def build_side_pose_archive(
             side_lines = _side_pose_label_lines(anns, classify, pose_side)
             if not side_lines:
                 continue
+            for line in side_lines:
+                per_class[int(line.split(" ", 1)[0])] += 1
             archive.writestr(
                 _label_arcname(labels_component, tax_id, filename),
                 _as_text(side_lines),
@@ -342,7 +371,7 @@ def build_side_pose_archive(
         archive.writestr("train.txt", _as_text(train_lines))
         archive.writestr("val.txt", _as_text(val_lines))
         archive.writestr("data.yaml", _side_pose_yaml())
-    return len(train_lines), len(val_lines)
+    return len(train_lines), len(val_lines), dict(per_class)
 
 
 def _classification_label(annotations, stage, flags, class_for) -> list[str]:
@@ -427,11 +456,14 @@ def main() -> None:
     def class_for(annotation, stage, flags):
         """Class id for one object, folding in the per-image stage/flag overrides.
 
-        Adult + top-down + Pinned -> ``top_down_pinned`` (checked first, most
-        specific); otherwise Adult + Macro -> ``macro``; a side view splits into
-        ``side_view_l`` / ``side_view_r`` by the present wing; otherwise the plain
-        viewpoint class (or ``None`` for POSE_NONE).
+        Larva-staged images are ``larva`` regardless of pose (their label is a
+        box drawn without keypoints). Otherwise: Adult + top-down + Pinned ->
+        ``top_down_pinned`` (most specific); Adult + Macro -> ``macro``; a side
+        view -> ``side_view``; otherwise the plain viewpoint class (or ``None``
+        for POSE_NONE, which drops the object).
         """
+        if stage == "Larva":
+            return name_to_id["larva"]
         pose = classify(annotation)
         is_adult = stage == "Adult"
         if is_adult and pose == top_down_pose and "Pinned" in flags:
@@ -439,8 +471,7 @@ def main() -> None:
         if is_adult and "Macro" in flags:
             return name_to_id["macro"]
         if pose == side_pose:
-            left = annotation.keypoints[1]
-            return name_to_id["side_view_l" if left.visibility > 0 else "side_view_r"]
+            return name_to_id["side_view"]
         return base_class_ids.get(pose)
 
     documented = collect_documented(moth_utils)
@@ -470,7 +501,7 @@ def main() -> None:
         labels_component,
         class_for,
     )
-    side_train, side_val = build_side_pose_archive(
+    side_train, side_val, side_per_class = build_side_pose_archive(
         side_zip,
         documented,
         val_indices,
@@ -488,6 +519,7 @@ def main() -> None:
         per_class,
         side_zip,
         (side_train, side_val),
+        side_per_class,
     )
 
 
@@ -499,6 +531,7 @@ def _print_summary(
     per_class: dict[int, int],
     side_zip: Path,
     side_counts: tuple[int, int],
+    side_per_class: dict[int, int],
 ) -> None:
     pose_train, pose_val = pose_counts
     cls_train, cls_val = cls_counts
@@ -512,6 +545,9 @@ def _print_summary(
         print(f"    {i} {name}: {per_class.get(i, 0)}")
     print(f"Side-view pose archive: {side_zip}")
     print(f"  side poses: {side_train + side_val} (train {side_train}, val {side_val})")
+    print("  objects per class:")
+    for i, name in enumerate(SIDE_POSE_NAMES):
+        print(f"    {i} {name}: {side_per_class.get(i, 0)}")
 
 
 if __name__ == "__main__":

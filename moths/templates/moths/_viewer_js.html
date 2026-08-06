@@ -36,6 +36,18 @@ API:
         var shiftDragHandler = null;
         var boxMode = false;
 
+        // Keep the viewer within the viewport: its height is the space from its
+        // own top edge down to the bottom (minus a small margin), so it never
+        // spills below the fold regardless of how tall the header/tabs are. A
+        // floor keeps it usable on short screens (then the page may scroll).
+        var VIEWER_MIN_HEIGHT = 360;
+        var VIEWER_BOTTOM_MARGIN = 24;
+        function sizeViewer() {
+            var top = viewer.getBoundingClientRect().top;
+            var avail = window.innerHeight - top - VIEWER_BOTTOM_MARGIN;
+            viewer.style.height = Math.max(VIEWER_MIN_HEIGHT, Math.floor(avail)) + "px";
+        }
+
         function apply() {
             stage.style.transform = "translate(" + tx + "px," + ty + "px) scale(" + scale + ")";
             stage.style.setProperty("--s", scale);
@@ -44,6 +56,7 @@ API:
         function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
         function fit() {
+            sizeViewer();
             var vw = viewer.clientWidth, vh = viewer.clientHeight;
             iw = img.naturalWidth || stage.offsetWidth;
             ih = img.naturalHeight || stage.offsetHeight;
@@ -134,17 +147,19 @@ API:
             else { zoomAt(e.clientX - rect.left, e.clientY - rect.top, 2); }
         });
 
+        sizeViewer();
         window.addEventListener("resize", fit);
 
-        // '[' and ']' navigate to the previous/next image (same view type).
+        // SPACE navigates to the next image (same view type).
         var navBar = document.getElementById("nav-bar");
         document.addEventListener("keydown", function (e) {
             if (e.metaKey || e.ctrlKey || e.altKey) return;
             var tag = e.target && e.target.tagName;
-            if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-            if (e.key === "[" && navBar && navBar.dataset.prev) {
-                window.location.href = navBar.dataset.prev;
-            } else if (e.key === "]" && navBar && navBar.dataset.next) {
+            if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ||
+                tag === "BUTTON" || tag === "A" ||
+                (e.target && e.target.isContentEditable)) return;
+            if ((e.key === " " || e.code === "Space") && navBar && navBar.dataset.next) {
+                e.preventDefault();  // don't scroll the page
                 window.location.href = navBar.dataset.next;
             }
         });
