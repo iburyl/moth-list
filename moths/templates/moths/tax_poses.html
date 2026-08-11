@@ -13,6 +13,15 @@
         </p>
     {% endif %}
 
+    {% if needs_rebuild %}
+        <p class="muted">
+            <span class="status-rebuild">Needs rebuild</span> — the pose cache is
+            missing or out of date. Any cached metrics are shown as-is (they may
+            be stale); uncached images are grouped live from their label files.
+            Use <strong>Rebuild pose index</strong> (in the sidebar) to refresh.
+        </p>
+    {% endif %}
+
     {% include "moths/_viewer_style.html" %}
     <style>
         .rebuild-btn {
@@ -74,8 +83,6 @@
             margin: 0; border: 1px solid #8883; border-radius: 8px; overflow: hidden;
             position: relative;
         }
-        /* Pose came from a model prediction (not a hand label). */
-        .image-grid figure.from-prediction { border: 2px solid #2563eb; }
         .image-grid a { position: relative; display: block; }
         .star-overlay {
             position: absolute; top: 6px; left: 6px; z-index: 1;
@@ -117,8 +124,8 @@
                         data-pixels="{% if row.pixel_span is not None %}{{ row.pixel_span }}{% endif %}"
                         data-sharpness="{% if row.sharpness is not None %}{{ row.sharpness }}{% endif %}"
                         data-score="{% if row.score is not None %}{{ row.score }}{% endif %}">
-                        <figure{% if row.from_prediction %} class="from-prediction"{% endif %}>
-                            {% if row.has_keypoints %}
+                        <figure>
+                            {% if row.is_norm %}
                                 <a href="{% url 'moths:image_normalized' row.image.filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}">
                             {% else %}
                                 <a href="{% url 'moths:image_edit' row.image.filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}">
@@ -131,22 +138,16 @@
                                 {% endif %}
                             </a>
                             <figcaption>
-                                {% if row.has_keypoints %}
-                                    {% if row.needs_rebuild %}
-                                        symmetry: &mdash;<br>
-                                        pixels: &mdash;
-                                        {% if row.is_top_down %}<br>sharpness: &mdash;<br>score: &mdash;{% endif %}
-                                        <br><span class="status-rebuild">to be rebuild</span>
-                                    {% else %}
-                                        symmetry: {% if row.metric is not None %}{{ row.metric|floatformat:4 }} <span class="scaled">({{ row.sym_score|floatformat:3 }})</span>{% else %}&mdash;{% endif %}<br>
-                                        pixels: {% if row.pixel_span is not None %}{{ row.pixel_span|floatformat:0 }} <span class="scaled">({{ row.pixel_score|floatformat:3 }})</span>{% else %}&mdash;{% endif %}
-                                        {% if row.sharpness is not None %}<br>sharpness: {{ row.sharpness_m|floatformat:3 }}M <span class="scaled">({{ row.sharp_score|floatformat:3 }})</span>{% endif %}
-                                        {% if row.score is not None %}<br>score: {{ row.score|floatformat:3 }}{% endif %}
-                                        {% if row.from_prediction %}<br><span class="status-pred">from prediction</span>{% endif %}
-                                    {% endif %}
+                                {% if row.has_metrics %}
+                                    {% if row.sym_score is not None %}symmetry: {{ row.metric|floatformat:4 }} <span class="scaled">({{ row.sym_score|floatformat:3 }})</span><br>{% endif %}
+                                    {% if row.pixel_score is not None %}pixels: {{ row.pixel_span|floatformat:0 }} <span class="scaled">({{ row.pixel_score|floatformat:3 }})</span><br>{% endif %}
+                                    {% if row.sharp_score is not None %}sharpness: {{ row.sharpness_m|floatformat:3 }}M <span class="scaled">({{ row.sharp_score|floatformat:3 }})</span><br>{% endif %}
+                                    {% if row.score is not None %}score: {{ row.score|floatformat:3 }}{% endif %}
                                 {% else %}
                                     obs {{ row.image.obs_id }} · photo {{ row.image.photo_id }}
-                                    {% if row.from_prediction %}<br><span class="status-pred">from prediction</span>{% endif %}
+                                {% endif %}
+                                {% if row.review_stage or row.review_box or row.needs_rebuild %}
+                                    <br>Todo: {% if row.review_stage or row.review_box %}<span class="status-pred">review {% if row.review_stage %}stage{% endif %}{% if row.review_stage and row.review_box %}, {% endif %}{% if row.review_box %}box{% endif %}</span>{% endif %}{% if row.review_stage or row.review_box %}{% if row.needs_rebuild %}; {% endif %}{% endif %}{% if row.needs_rebuild %}<span class="status-rebuild">rebuild</span>{% endif %}
                                 {% endif %}
                             </figcaption>
                         </figure>

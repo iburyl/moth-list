@@ -1,7 +1,8 @@
 {% comment %}
-Flat per-species stats table (thumbnail, taxonomy, per-stage / view / labels
-counts, obs). Expects `rows` (see views._index_row) and `stages`. Shared by the
-legacy index and the genus-level browse page.
+Flat per-species stats table (thumbnail, taxonomy, per-stage / view counts, a
+"to review" group of hand-label gaps (stage / box), obs). Expects `rows` (see
+views._index_row) and `stages`. Shared by the legacy index and the genus-level
+browse page.
 {% endcomment %}
 <style>
     .tax-table {
@@ -45,7 +46,7 @@ legacy index and the genus-level browse page.
             <th class="tax-col" rowspan="2">species</th>
             <th class="group-head col-group" colspan="{{ stages|length }}">stages</th>
             <th class="group-head col-group" colspan="4">view</th>
-            <th class="group-head col-group" colspan="2">labels</th>
+            <th class="group-head col-group" colspan="2" title="Hand-label gaps still to review">to review</th>
             <th class="col-group" rowspan="2" title="iNaturalist observation count (from the names CSV)">obs</th>
         </tr>
         <tr>
@@ -56,8 +57,8 @@ legacy index and the genus-level browse page.
             <th>side</th>
             <th>bottom-up</th>
             <th>unclear</th>
-            <th class="col-group">no stage</th>
-            <th>no box</th>
+            <th class="col-group" title="Images with no hand stage label">stage</th>
+            <th title="Images with no hand box label">box</th>
         </tr>
     </thead>
     <tbody>
@@ -77,10 +78,10 @@ legacy index and the genus-level browse page.
                 <td class="tax-col">{{ row.subfamily|default:"—" }}</td>
                 <td class="tax-col"><a href="{% url 'moths:pose_view' row.tax_id %}" title="{% if row.name %}{{ row.name }} ({{ row.tax_id }}){% else %}{{ row.tax_id }}{% endif %}">{{ row.species|default:row.tax_id }}</a></td>
                 {% for cell in row.stage_cells %}
-                    <td class="num{% if forloop.first %} col-group{% endif %}">{% include "moths/_count_cell.html" with count=cell.count color=cell.color tax_id=row.tax_id qkey="stage" qval=cell.stage %}</td>
+                    <td class="num{% if forloop.first %} col-group{% endif %}">{% include "moths/_count_cell.html" with count=cell.count tax_id=row.tax_id qkey="stage" qval=cell.stage %}</td>
                 {% endfor %}
                 {% for cell in row.view_cells %}
-                    <td class="num{% if forloop.first %} col-group{% endif %}">{% include "moths/_count_cell.html" with count=cell.count color=cell.color tax_id=row.tax_id qkey="pose" qval=cell.pose %}</td>
+                    <td class="num{% if forloop.first %} col-group{% endif %}">{% include "moths/_count_cell.html" with count=cell.count tax_id=row.tax_id qkey="pose" qval=cell.pose %}</td>
                 {% endfor %}
                 <td class="num col-group">{% include "moths/_count_cell.html" with count=row.no_stage tax_id=row.tax_id qkey="stage" qval="none" %}</td>
                 <td class="num">{% include "moths/_count_cell.html" with count=row.no_box tax_id=row.tax_id qkey="labeled" qval="no" %}</td>

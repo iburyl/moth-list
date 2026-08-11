@@ -29,6 +29,7 @@ from .utils import (
     classify_pose,
     compute_normalization,
     clear_image_class,
+    clear_normalized,
     delete_images,
     find_image,
     get_class_and_flags,
@@ -38,6 +39,7 @@ from .utils import (
     get_image_dir,
     get_image_path,
     get_label_path,
+    get_prediction_path,
     get_name_info,
     get_image_details,
     get_observation_info,
@@ -46,12 +48,14 @@ from .utils import (
     get_predicted_class_and_flags,
     get_predicted_pose_class,
     get_side_wing_stats_path,
+    get_tax_summary_path,
     get_tax_thumbnail,
     get_wing_stats_path,
-    group_by_tax_id,
+    scan_tax_images,
     is_image_starred,
     list_tax_ids,
     load_annotations,
+    load_names,
     load_pose_data,
     load_pose_data_raw,
     load_predictions,
@@ -60,6 +64,7 @@ from .utils import (
     load_tax_summary,
     mark_pose_row_stale,
     pose_data_version_ok,
+    pose_row_needs_rebuild,
     refresh_tax_thumbnail,
     save_annotations,
     score_components,
@@ -96,8 +101,6 @@ ADULT_POSE_GROUP = {
 
 # Poses whose images carry keypoints: metrics, normalized-view link, score sort.
 KEYPOINT_POSES = {POSE_TOP_DOWN, POSE_SIDE, POSE_BOTTOM_UP, POSE_UNCLEAR}
-# Poses that have a normalized crop -> use the normalized thumbnail.
-NORM_POSES = {POSE_TOP_DOWN, POSE_SIDE}
 
 # Stage keys that get their own base/flag subsections (anything else -> unknown).
 STAGE_KEYS = ("Adult", "Pupa", "Larva", "Egg")
@@ -176,13 +179,6 @@ def _target_group_ids(stage, flags, pose):
 VISIBILITY_COLORS = {0: "#9ca3af", 1: "#f59e0b", 2: "#22c55e"}
 
 
-# Endpoints for the class-source colour blend on the index page: a stage count
-# is green when every image's stage comes from a hand label, blue when it comes
-# entirely from predictions, and a proportional blend in between.
-_CLASS_LABEL_RGB = (0x16, 0xA3, 0x4A)
-_CLASS_PRED_RGB = (0x25, 0x63, 0xEB)
-
-
 # Display labels for the index "view" (pose) column group.
 VIEW_POSE_LABELS = {
     POSE_TOP_DOWN: "top-down",
@@ -190,19 +186,6 @@ VIEW_POSE_LABELS = {
     POSE_BOTTOM_UP: "bottom-up",
     POSE_UNCLEAR: "unclear",
 }
-
-
-def _class_source_color(label_count: int, pred_count: int) -> str | None:
-    """Blend green (all labels) .. blue (all predictions); ``None`` if empty."""
-    total = label_count + pred_count
-    if total <= 0:
-        return None
-    frac_pred = pred_count / total
-    rgb = tuple(
-        round(lo + (hi - lo) * frac_pred)
-        for lo, hi in zip(_CLASS_LABEL_RGB, _CLASS_PRED_RGB)
-    )
-    return "#%02x%02x%02x" % rgb
 
 
 def index(request):
@@ -229,35 +212,21 @@ def _index_row(tax_id: str) -> dict:
 
     counts = (summary or {}).get("counts", {})
     stages_map = counts.get("stages", {})
-    stage_sources = counts.get("stage_sources", {})
     views_map = counts.get("views", {})
-    view_sources = counts.get("view_sources", {})
     thumbnail = (summary or {}).get("thumbnail") or {}
     has_summary = summary is not None
 
     def _stage_cell(stage):
-        if not has_summary:
-            return {"stage": stage, "count": None, "color": None}
         return {
             "stage": stage,
-            "count": stages_map.get(stage, 0),
-            "color": _class_source_color(
-                stage_sources.get(stage, {}).get("label", 0),
-                stage_sources.get(stage, {}).get("prediction", 0),
-            ),
+            "count": stages_map.get(stage, 0) if has_summary else None,
         }
 
     def _view_cell(pose):
-        if not has_summary:
-            return {"pose": pose, "label": VIEW_POSE_LABELS[pose], "count": None, "color": None}
         return {
             "pose": pose,
             "label": VIEW_POSE_LABELS[pose],
-            "count": views_map.get(pose, 0),
-            "color": _class_source_color(
-                view_sources.get(pose, {}).get("label", 0),
-                view_sources.get(pose, {}).get("prediction", 0),
-            ),
+            "count": views_map.get(pose, 0) if has_summary else None,
         }
 
     return {
@@ -375,8 +344,10 @@ def browse(request, lineage=""):
     if data is None:
         return render(request, "moths/browse.html", {"missing": True})
 
+    # An over-long path (a species tax_id appended to a genus) or a segment that
+    # isn't in the tree is an unknown taxon path -> stub, not a 404.
     if len(keys) > 4:
-        raise Http404("No browse page for a single species")
+        return render(request, "moths/browse.html", {"unknown": True, "lineage": lineage})
 
     # Descend the tree by key: the root's children live under "superfamilies",
     # every deeper node's under "children".
@@ -385,7 +356,7 @@ def browse(request, lineage=""):
         container = node["superfamilies"] if node is data else node["children"]
         child = container.get(key)
         if child is None:
-            raise Http404(f"Unknown taxon path: {lineage!r}")
+            return render(request, "moths/browse.html", {"unknown": True, "lineage": lineage})
         node = child
 
     depth = len(keys)
@@ -457,6 +428,7 @@ def browse(request, lineage=""):
 
     context = {
         "missing": False,
+        "unknown": False,
         "crumbs": crumbs,
         "children": children,
         "index_rows": index_rows,
@@ -470,6 +442,135 @@ def browse(request, lineage=""):
         "level_label": BROWSE_LEVELS[depth - 1] if depth else "",
     }
     return render(request, "moths/browse.html", context)
+
+
+# --- Global taxon search (header autocomplete) -------------------------------
+
+# Taxonomic ranks by descent depth; lower depth = higher (broader) rank, which
+# is what wins ties per "no exact match -> the highest rank is chosen".
+_SEARCH_RANKS = ("superfamily", "family", "subfamily", "genus", "species")
+# Parsed flat search index, rebuilt when tax_summary.json changes.
+_SEARCH_INDEX_CACHE: dict = {"mtime": None, "entries": []}
+
+
+def _build_search_entries() -> list[dict]:
+    """Flatten the hierarchical summary into a searchable taxon list.
+
+    Every superfamily/family/subfamily/genus node becomes a "higher" entry that
+    links to its browse page; every *present* species leaf (an image folder or
+    cached images) becomes a "species" entry linking to its poses view. Bucket
+    keys ("(unknown)" / "-") are traversed but never themselves searchable.
+    Each entry carries the lowercased strings it can be matched on plus its
+    rank depth for ordering.
+    """
+    data = load_tax_summary()
+    if not data:
+        return []
+    entries: list[dict] = []
+
+    def add_higher(key, depth, segs):
+        if key in (_UNKNOWN_TAXON, _NO_SUBFAMILY):
+            return
+        entries.append({
+            "label": key,
+            "detail": _SEARCH_RANKS[depth],
+            "kind": "higher",
+            "depth": depth,
+            "url": reverse("moths:browse", args=["/".join(segs)]),
+            "search": [key.lower()],
+        })
+
+    for sf_key, sf in data.get("superfamilies", {}).items():
+        sf_seg = _browse_key_to_seg(sf_key)
+        add_higher(sf_key, 0, [sf_seg])
+        for fam_key, fam in sf.get("children", {}).items():
+            fam_seg = _browse_key_to_seg(fam_key)
+            add_higher(fam_key, 1, [sf_seg, fam_seg])
+            for subf_key, subf in fam.get("children", {}).items():
+                subf_seg = _browse_key_to_seg(subf_key)
+                add_higher(subf_key, 2, [sf_seg, fam_seg, subf_seg])
+                for gen_key, gen in subf.get("children", {}).items():
+                    gen_seg = _browse_key_to_seg(gen_key)
+                    add_higher(gen_key, 3, [sf_seg, fam_seg, subf_seg, gen_seg])
+                    for tax_id, leaf in gen.get("children", {}).items():
+                        if not (leaf.get("has_folder") or leaf.get("has_image")):
+                            continue
+                        species = (leaf.get("species") or "").strip()
+                        common = (leaf.get("name") or "").strip()
+                        entries.append({
+                            "label": species or common or str(tax_id),
+                            "detail": common if (species and common) else "species",
+                            "kind": "species",
+                            "depth": 4,
+                            "url": reverse("moths:pose_view", args=[str(tax_id)]),
+                            "search": [
+                                s.lower()
+                                for s in (species, common, str(tax_id))
+                                if s
+                            ],
+                        })
+    return entries
+
+
+def _search_entries() -> list[dict]:
+    """Return the taxon search index, rebuilt only when the summary changes."""
+    try:
+        mtime = get_tax_summary_path().stat().st_mtime
+    except OSError:
+        mtime = None
+    if _SEARCH_INDEX_CACHE["mtime"] != mtime:
+        _SEARCH_INDEX_CACHE["entries"] = _build_search_entries()
+        _SEARCH_INDEX_CACHE["mtime"] = mtime
+    return _SEARCH_INDEX_CACHE["entries"]
+
+
+def _search_tier(entry: dict, q: str) -> int | None:
+    """Best match tier of ``entry`` for query ``q``: 0 exact, 1 prefix, 2 sub.
+
+    ``None`` when nothing matches. Tiers rank match quality; ties break on the
+    taxonomic rank (broader first) so a partial query resolves to the highest
+    rank, per the spec.
+    """
+    tier = None
+    for text in entry["search"]:
+        if text == q:
+            return 0
+        if text.startswith(q):
+            tier = 1 if tier is None else min(tier, 1)
+        elif q in text:
+            tier = 2 if tier is None else min(tier, 2)
+    return tier
+
+
+def taxon_search(request):
+    """JSON autocomplete for the header search box.
+
+    ``?q=`` is matched (case-insensitive) against superfamily/family/subfamily/
+    genus names and species (scientific + common name + id). Results are ordered
+    by match quality (exact, prefix, substring), then by broader taxonomic rank,
+    then alphabetically, and capped to five. Each result carries the target
+    ``url`` (browse page for a rank, poses view for a species) so the client can
+    navigate on Enter/selection.
+    """
+    q = (request.GET.get("q") or "").strip().lower()
+    results: list[dict] = []
+    if q:
+        scored = []
+        for entry in _search_entries():
+            tier = _search_tier(entry, q)
+            if tier is not None:
+                scored.append((tier, entry["depth"], entry["label"].lower(), entry))
+        scored.sort(key=lambda item: item[:3])
+        results = [
+            {
+                "label": e["label"],
+                "detail": e["detail"],
+                "kind": e["kind"],
+                "url": e["url"],
+            }
+            for _tier, _depth, _label, e in scored[:5]
+        ]
+    return JsonResponse({"results": results})
 
 
 def observation_lookup(request):
@@ -607,74 +708,92 @@ def _pose_row_sort_key(row):
     return (not row["starred"], -(score if score is not None else float("-inf")))
 
 
-def _make_row(image, data, version_ok, starred, is_adult, flags=(), class_from_prediction=False):
+def _make_row(image, data, starred, is_adult, flags=(), class_from_prediction=False,
+              file_versions=None, box_from_prediction=False):
     """Build a template row for one image from its cached pose ``data``.
 
-    Keypoint treatment (metrics/scores, normalized thumbnail + normalized-view
-    link, and score-sorting of the group) applies only to **Adult** images with
-    a keypoint pose (top-down/side/bottom-up/unclear). Non-adult stages get a
-    plain thumbnail and the edit link even when their only pose source is a
-    leftover adult prediction — otherwise a larva/pupa would be score-sorted and
-    reshuffle as its cached row is flagged for rebuild. Pose info travels on the
-    row so a single flag subsection can mix images of different poses.
+    Any image with at least one computable metric (symmetry / pixels /
+    sharpness) gets per-metric sub-scores and a general ``score`` = the minimum
+    across the *available* sub-scores; every category then sorts by that score
+    (starred first). Images with no metric at all fall back to an obs/photo
+    caption and sort last. ``has_keypoints`` still marks the full keypoint adults
+    (top-down/side/vertical), used only to describe the pose crop.
 
-    A ``NO_NORM_FLAGS`` flag (e.g. "Mating") also drops the keypoint treatment:
-    the image is never normalized, so it renders as a plain thumbnail linking to
-    the edit view, and its subsection carries no score column.
+    The normalized crop (``is_norm``) drives both the thumbnail and the click
+    target: any image with a normalized crop shows it and links to the
+    normalized view; images without one show the plain thumbnail and link to the
+    edit view. Keypoint adults get their pose crop, and every other boxed image
+    (non-adult, or an image whose flag suppresses pose normalization) gets the
+    simplified bounding-box crop.
 
-    ``class_from_prediction`` is set when the image's stage/flags themselves came
-    from the prediction folder (no hand ``.class``); it forces the blue "from
-    prediction" marker on regardless of the keypoint source.
+    Metric values are shown as cached, even if the cache is a stale metric
+    version or the keypoints changed since (a rebuild, or the normalized view,
+    refreshes them) — a slightly stale number is more useful than an em dash.
+
+    Per-plate "Todo" hints are derived here, each shown only when actually
+    needed. ``review_stage`` (``class_from_prediction``: the stage/flags came
+    from prediction, no hand ``.class``) and ``review_box``
+    (``box_from_prediction``: the box/keypoints come from prediction, no hand
+    label yet) drive a blue "review stage" / "review box" / "review stage, box"
+    note. ``needs_rebuild`` (via :func:`pose_row_needs_rebuild`, using
+    ``file_versions`` — the file-level ``metric_versions`` of the cache — to
+    judge staleness) drives an orange "rebuild" note. Neither draws a border.
+
+    Both review hints are read from the *live* label folders (not the cached
+    ``source``), so they clear as soon as a hand label exists — decoupled from
+    the metric rebuild, which the "rebuild" hint tracks separately.
     """
     pose = data.get("pose", POSE_NONE)
     no_norm = flags_suppress_normalization(flags)
     has_keypoints = is_adult and pose in KEYPOINT_POSES and not no_norm
-    row = {
+    # Every image with a normalized crop shows its normalized thumbnail. Adults
+    # with a keypoint pose (top-down/side/vertical) always have one; any other
+    # image that has a bounding box gets the simplified bbox crop instead. A
+    # cached ``sharpness`` (computed from that box) is the cheap "has a box"
+    # signal, matching exactly when ``compute_normalization`` returns a crop.
+    is_norm = has_keypoints or data.get("sharpness") is not None
+
+    symmetry = data.get("symmetry")
+    pixel_span = data.get("pixel_span")
+    sharpness = data.get("sharpness")
+    sym_score, pixel_score, sharp_score = score_components(symmetry, pixel_span, sharpness)
+    # General score = min across whatever sub-scores exist (weakest link over the
+    # available metrics). Computed live so it's right even when the cached
+    # ``score`` predates a metric/formula change.
+    available = [s for s in (sym_score, pixel_score, sharp_score) if s is not None]
+    score = min(available) if available else None
+
+    return {
         "image": image,
         "starred": image.filename in starred,
         "has_keypoints": has_keypoints,
-        "is_norm": is_adult and pose in NORM_POSES and not no_norm,
+        "has_metrics": bool(available),
+        "is_norm": is_norm,
         "is_top_down": is_adult and pose == POSE_TOP_DOWN and not no_norm,
-        "from_prediction": class_from_prediction,
-        "needs_rebuild": False,
-        "metric": None,
-        "sym_score": None,
-        "pixel_span": None,
-        "pixel_score": None,
-        "sharpness": None,
-        "sharpness_m": None,
-        "sharp_score": None,
-        "score": None,
+        "review_stage": bool(class_from_prediction),
+        "review_box": bool(box_from_prediction),
+        "needs_rebuild": pose_row_needs_rebuild(data, file_versions),
+        "metric": symmetry,
+        "sym_score": sym_score,
+        "pixel_span": pixel_span,
+        "pixel_score": pixel_score,
+        "sharpness": sharpness,
+        "sharpness_m": None if sharpness is None else sharpness / 1_000_000,
+        "sharp_score": sharp_score,
+        "score": score,
     }
-    if has_keypoints:
-        needs_rebuild = (not version_ok) or bool(data.get("needs_rebuild"))
-        symmetry = None if needs_rebuild else data.get("symmetry")
-        pixel_span = None if needs_rebuild else data.get("pixel_span")
-        sharpness = None if needs_rebuild else data.get("sharpness")
-        sym_score, pixel_score, sharp_score = score_components(
-            symmetry, pixel_span, sharpness
-        )
-        row.update(
-            {
-                "metric": symmetry,
-                "sym_score": sym_score,
-                "pixel_span": pixel_span,
-                "pixel_score": pixel_score,
-                "sharpness": sharpness,
-                "sharpness_m": None if sharpness is None else sharpness / 1_000_000,
-                "sharp_score": sharp_score,
-                "score": None if needs_rebuild else data.get("score"),
-                "from_prediction": class_from_prediction or (
-                    not needs_rebuild and data.get("source") == "prediction"
-                ),
-                "needs_rebuild": needs_rebuild,
-            }
-        )
-    return row
 
 
-def _build_unified_groups(tax_id, images, image_list):
+def _build_unified_groups(tax_id, image_list, cached):
     """Return the ordered, non-empty unified groups for ``image_list``.
+
+    Reads the pre-loaded ``cached`` pose data *without ever rebuilding it*: an
+    image with no cached row (missing/stale cache) is classified live from its
+    label file so it still lands in the right group. Cached metric values are
+    shown as-is (even if their version is stale or the keypoints changed) —
+    :func:`_make_row` never blanks them; a rebuild refreshes them. This keeps
+    the poses view a pure read — the caller shows a "needs rebuild" banner and
+    the explicit Rebuild button regenerates the cache.
 
     Each image is placed in its flag subsection(s) when flagged, otherwise in its
     stage/pose subsection. A group's ``has_keypoints``/``is_top_down`` reflect
@@ -682,21 +801,30 @@ def _build_unified_groups(tax_id, images, image_list):
     bar/score column). Keypoint-bearing groups sort starred-first then by score.
     Empty groups are dropped.
     """
-    cached = load_pose_data_raw(tax_id)
-    if cached is None and images:
-        cached = build_pose_data(tax_id, images)
-    version_ok = pose_data_version_ok(cached) if cached else False
     per_image = cached.get("images", {}) if cached else {}
+    file_versions = cached.get("metric_versions") if cached else None
     starred = load_starred(tax_id)
 
     buckets = {gid: [] for gid, _label, _unknown in _unified_group_defs()}
     for image in image_list:
         stage, flags, class_source = get_class_and_flags_with_source(image.filename)
-        data = per_image.get(image.filename) or {}
+        # No cached row (missing/stale cache): classify live so grouping is
+        # correct; the row then has no metrics (they show as em dashes) until a
+        # rebuild populates them.
+        data = per_image.get(image.filename)
+        if data is None:
+            data = {"pose": classify_pose(image.filename)}
         pose = data.get("pose", POSE_NONE)
+        # Live box source (two cheap stats, cache-independent): the box comes
+        # from prediction only while there's a prediction label and no hand
+        # label yet, so "review box" clears the moment a hand box is drawn.
+        box_from_prediction = (
+            get_prediction_path(image.filename).is_file()
+            and not get_label_path(image.filename).is_file()
+        )
         row = _make_row(
-            image, data, version_ok, starred, stage == "Adult", flags,
-            class_source == "prediction",
+            image, data, starred, stage == "Adult", flags,
+            class_source == "prediction", file_versions, box_from_prediction,
         )
         for gid in _target_group_ids(stage, flags, pose):
             if gid in buckets:
@@ -707,16 +835,15 @@ def _build_unified_groups(tax_id, images, image_list):
         rows = buckets[gid]
         if not rows:
             continue
-        group_has_keypoints = any(r["has_keypoints"] for r in rows)
-        if group_has_keypoints:
-            rows = sorted(rows, key=_pose_row_sort_key)
+        # Every category sorts by the general score (starred first, score desc);
+        # rows without any metric (score None) fall to the end.
+        rows = sorted(rows, key=_pose_row_sort_key)
         groups.append(
             {
                 "id": gid,
                 "label": label,
                 "rows": rows,
-                "has_keypoints": group_has_keypoints,
-                # Controls the sharpness/score sort buttons + rebuild caption.
+                "has_keypoints": any(r["has_keypoints"] for r in rows),
                 "is_top_down": any(r["is_top_down"] for r in rows),
                 "is_unknown": is_unknown_base,
             }
@@ -724,28 +851,71 @@ def _build_unified_groups(tax_id, images, image_list):
     return groups
 
 
+def _tax_stub(request, tax_id, unknown):
+    """Render the stub page for a taxon with nothing to show.
+
+    ``unknown`` distinguishes a tax_id absent from the names CSV (an unknown
+    taxon) from a known one that simply has no data on disk yet.
+    """
+    info = get_name_info(tax_id)
+    context = {
+        "tax_id": tax_id,
+        "unknown": unknown,
+        "name": info.get("name") or "",
+        "species": info.get("species") or "",
+    }
+    return render(request, "moths/tax_stub.html", context)
+
+
 def pose_view(request, tax_id):
     """Unified per-tax view: images grouped by stage, adults split by pose.
 
+    This view is a **pure read** — it never rebuilds a cache in the background.
+    The states it distinguishes:
+
+    * ``tax_id`` not in the names CSV -> the "unknown taxon" stub.
+    * known but with no observations *and* no summary yet -> the "no data" stub.
+    * known with a summary but no observations -> the normal page's "no data".
+    * known with observations but a missing/stale summary or pose cache -> the
+      images are shown (grouped live from their label files, metrics blank) with
+      a "needs rebuild" banner; the explicit Rebuild button regenerates caches.
+    * known with observations and current caches -> the full view.
+
     Groups (in order): Adult top-down/side/bottom-up/unclear/no-keypoints, then
     Pupa, Larvae, Egg, and finally images with no stage class ("Unknown
-    stage"); empty groups are hidden. Adult-with-keypoints images link to the
-    normalized view (top-down uses normalized thumbnails and shows metrics);
-    all others link to the edit view. Honors the stage/labeled filters.
-    If the tax_id folder exists but has no images, the page still renders with a
-    "no data" note.
+    stage"); empty groups are hidden. Any image with a normalized crop shows its
+    normalized thumbnail and links to the normalized view; images without one
+    (no bounding box) show the plain thumbnail and link to the edit view.
+    Keypoint adults additionally show metrics and are score-sorted. Honors the
+    stage/labeled filters.
     """
-    images = group_by_tax_id().get(tax_id) or []
-    if not images and not (get_image_dir() / tax_id).is_dir():
-        raise Http404(f"No images found for tax_id {tax_id!r}")
+    # Unknown from the CSV's perspective -> stub, regardless of any stray files.
+    # Guard on a non-empty index so a missing/unreadable names CSV degrades to
+    # the old behaviour instead of flagging every taxon as unknown.
+    names = load_names()
+    if names and str(tax_id) not in names:
+        return _tax_stub(request, tax_id, unknown=True)
+
+    images = scan_tax_images(tax_id)
+    summary = load_summary(tax_id)  # None when missing OR at a stale version
+
+    if not images:
+        # Known but nothing on disk: a valid summary means "covered, no images"
+        # (render the normal no-data page); otherwise there is nothing to show.
+        if summary is None:
+            return _tax_stub(request, tax_id, unknown=False)
 
     stage_filter, labeled_filter, pose_filter = _parse_filters(request)
     filtered = _filter_images(images, stage_filter, labeled_filter, pose_filter)
 
-    # Consistency check: refresh the index summary cache against actual files.
-    build_summary(tax_id, images)
+    # Read the pose cache as-is (never rebuilt here). A missing/stale summary or
+    # pose cache, when there are images to show, drives the "needs rebuild"
+    # banner; nothing is written until the user hits Rebuild.
+    cached = load_pose_data_raw(tax_id)
+    version_ok = pose_data_version_ok(cached)
+    needs_rebuild = bool(images) and (summary is None or not version_ok)
 
-    groups = _build_unified_groups(tax_id, images, filtered)
+    groups = _build_unified_groups(tax_id, filtered, cached)
 
     context = {
         "tax_id": tax_id,
@@ -753,6 +923,7 @@ def pose_view(request, tax_id):
         "total": len(filtered),
         "total_all": len(images),
         "has_images": bool(images),
+        "needs_rebuild": needs_rebuild,
         "wing_stats_available": get_wing_stats_path(tax_id).is_file(),
         "side_wing_stats_available": get_side_wing_stats_path(tax_id).is_file(),
         "filter_desc": _filter_desc(stage_filter, labeled_filter, pose_filter),
@@ -768,11 +939,14 @@ def rebuild_poses(request, tax_id):
 
     Preserves the active filters (carried in the query string) on redirect.
     """
-    images = group_by_tax_id().get(tax_id)
+    images = scan_tax_images(tax_id)
     if not images:
         raise Http404(f"No images found for tax_id {tax_id!r}")
 
+    # Explicit, user-triggered rebuild: refresh both the pose cache and the
+    # index summary (+ soft tree update) so the "needs rebuild" banner clears.
     build_pose_data(tax_id, images)
+    build_summary(tax_id, images)
 
     url = reverse("moths:pose_view", args=[tax_id])
     query = request.GET.urlencode()
@@ -790,12 +964,16 @@ def _ordered_nav(request, image):
     the unfiltered order if the current image is filtered out. Sharing this one
     helper keeps edit/normalized/poses navigation consistent.
     """
-    images = group_by_tax_id().get(image.tax_id, [])
+    images = scan_tax_images(image.tax_id)
     stage_filter, labeled_filter, pose_filter = _parse_filters(request)
     filtered = _filter_images(images, stage_filter, labeled_filter, pose_filter)
 
+    # Read the pose cache as-is (navigation never rebuilds); grouping falls back
+    # to live classification for uncached images, matching the poses view.
+    cached = load_pose_data_raw(image.tax_id)
+
     def ordered(image_list):
-        groups = _build_unified_groups(image.tax_id, images, image_list)
+        groups = _build_unified_groups(image.tax_id, image_list, cached)
         # A flagged image can appear in several flag subsections; keep the first
         # occurrence so navigation visits each image once.
         seen = set()
@@ -905,10 +1083,12 @@ def image_edit(request, filename):
 
 
 def image_normalized(request, filename):
-    """Read-only pose-normalized view with a star/unstar control.
+    """Read-only normalized view with a star/unstar control.
 
-    Redirects to the edit view when the image has no normalized crop (missing
-    prediction keypoints), so the back/tabs never dead-end.
+    Shows the pose-normalized crop (side / vertical F→B) for adults with F&B
+    keypoints, or the simplified bounding-box crop otherwise. Redirects to the
+    edit view only when the image has no annotation/box at all (no crop to
+    show), so the back/tabs never dead-end.
     """
     image = find_image(filename)
     if image is None:
@@ -955,10 +1135,15 @@ def image_normalized(request, filename):
     quality_grade = observation.get("quality_grade")
 
     # Reference-circle geometry (as % of the crop) matching the pose's scaling:
-    # 90% for top-down/bottom-up, 80% for side view.
-    circle_radius = normalization.get("circle_radius", 0.45)
-    circle_pct = circle_radius * 2 * 100
-    circle_offset_pct = (0.5 - circle_radius) * 100
+    # 90% for the vertical F→B layout, 80% for side view. The bounding-box
+    # layout has no reference circle (``circle_radius`` is ``None``).
+    circle_radius = normalization.get("circle_radius")
+    if circle_radius:
+        circle_pct = circle_radius * 2 * 100
+        circle_offset_pct = (0.5 - circle_radius) * 100
+    else:
+        circle_pct = None
+        circle_offset_pct = None
 
     context = {
         "image": image,
@@ -1011,6 +1196,8 @@ def set_selection_stage(request, tax_id):
         if tax_id_for_file(filename) != tax_id or find_image(filename) is None:
             continue
         set_image_class(filename, stage)
+        # Stage drives the normalization layout, so drop the cached crop.
+        clear_normalized(filename)
         count += 1
     if count:
         update_summary(tax_id)
@@ -1099,11 +1286,14 @@ def set_stage(request, filename):
     stage = (request.POST.get("stage") or "").strip()
     if not stage:
         clear_image_class(filename)
+        # Stage drives the normalization layout, so drop the cached crop.
+        clear_normalized(filename)
         update_summary(tax_id_for_file(filename))
         return JsonResponse({"stage": None})
     if stage not in STAGES:
         return JsonResponse({"error": "invalid stage"}, status=400)
     set_image_class(filename, stage)
+    clear_normalized(filename)
     update_summary(tax_id_for_file(filename))
     return JsonResponse({"stage": stage})
 

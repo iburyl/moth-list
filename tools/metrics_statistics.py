@@ -462,6 +462,32 @@ def _box_sharpness(np, moth_utils, filename):
     return _scharr_energy(np, arr)
 
 
+def _norm7_sharpness(np, moth_utils, filename):
+    """Scharr/Tenengrad energy of the centre cell of the normalized thumbnail.
+
+    Splits the pose-normalized thumbnail (``<name>.norm-thumb`` — the body
+    centred/rotated to a fixed frame) into a 7x7 grid and measures the middle
+    cell, i.e. the moth's core. ``None`` when the image has no normalized crop
+    (needs keypoints) or the thumbnail is too small to grid.
+    """
+    from PIL import Image
+
+    result = moth_utils.get_or_create_normalized(filename)
+    if result is None:
+        return None
+    _norm_path, thumb_path = result
+    try:
+        with Image.open(thumb_path) as im:
+            arr = np.asarray(im.convert("L"), dtype=np.float64)
+    except (OSError, ValueError):
+        return None
+    h, w = arr.shape
+    if h < 7 or w < 7:
+        return None
+    cell = arr[(3 * h) // 7:(4 * h) // 7, (3 * w) // 7:(4 * w) // 7]
+    return _scharr_energy(np, cell)
+
+
 def _corr(values, details) -> float | None:
     """Pearson r over the pairs where ``values`` is not ``None``."""
     pairs = [(v, d) for v, d in zip(values, details) if v is not None]
@@ -534,13 +560,74 @@ def sharp_score_calibration(ratings, log_sharps) -> dict | None:
     }
 
 
+# --- bad(1-2)/good(3-5) threshold separability -------------------------------
+#
+# Treat each metric as a one-threshold classifier: images rated 1-2 are "bad",
+# 3-5 are "good", and (all metrics correlate positively) a value *above* the cut
+# is predicted "good". For each metric we pick the cut that minimises the total
+# misjudged (bad above the cut + good below it) — the fewest mistakes a single
+# threshold can make, i.e. how well that metric alone would gate a harvest.
+# ``sharp_log`` is omitted: a monotone transform can't change the cut, so it
+# scores identically to ``sharp``.
+SEP_METRICS = ("pixel", "sharp", "min", "fb1", "box", "norm7")
+SEP_GOOD_MIN = 3  # rating >= this is "good"; below it is "bad"
+
+
+def _best_split(values, labels) -> dict | None:
+    """Threshold that best separates good (higher) from bad, ``None`` if empty.
+
+    ``labels`` is truthy for "good". Pairs with a ``None`` value are dropped, so
+    each metric is judged over whatever subset it covers. Returns
+    ``{threshold, miss, bad_as_good, good_as_bad, n, bad, good}`` where the rule
+    is "predict good when value > threshold" (``-inf`` = predict all good).
+    """
+    pairs = sorted((v, bool(l)) for v, l in zip(values, labels) if v is not None)
+    n = len(pairs)
+    if n == 0:
+        return None
+    total_bad = sum(1 for _, good in pairs if not good)
+    total_good = n - total_bad
+
+    # Start below every value: everything predicted good, so all bad are wrong.
+    bad_as_good, good_as_bad = total_bad, 0
+    best = {"threshold": float("-inf"), "miss": total_bad,
+            "bad_as_good": total_bad, "good_as_bad": 0}
+
+    # Sweep the cut upward; each value that drops below it flips to "bad".
+    i = 0
+    while i < n:
+        value = pairs[i][0]
+        j = i
+        while j < n and pairs[j][0] == value:
+            if pairs[j][1]:
+                good_as_bad += 1   # a good image now (wrongly) below the cut
+            else:
+                bad_as_good -= 1   # a bad image now (correctly) below the cut
+            j += 1
+        miss = bad_as_good + good_as_bad
+        if miss < best["miss"]:
+            best = {"threshold": value, "miss": miss,
+                    "bad_as_good": bad_as_good, "good_as_bad": good_as_bad}
+        i = j
+
+    best.update({"n": n, "bad": total_bad, "good": total_good})
+    return best
+
+
+def _separability(sample: dict) -> dict:
+    """Best bad/good split per metric for a collected sample (see SEP_METRICS)."""
+    labels = [d >= SEP_GOOD_MIN for d in sample["details"]]
+    return {metric: _best_split(sample[metric], labels) for metric in SEP_METRICS}
+
+
 def _correlations(sample: dict) -> dict:
     """Pearson r of each metric vs the details rating for a collected sample.
 
     Sharpness is shown raw and log-transformed (a higher r(log) means a log
-    straightens it into a more linear predictor). ``fb1``/``box`` are the two
-    experimental proxies; they may be ``None`` per image (missing image, box or
-    keypoints), so their correlation is over whatever subset is available.
+    straightens it into a more linear predictor). ``fb1``/``box``/``norm7`` are
+    the experimental proxies; they may be ``None`` per image (missing image,
+    box, keypoints or normalized crop), so their correlation is over whatever
+    subset is available.
     """
     d = sample["details"]
     return {
@@ -550,6 +637,7 @@ def _correlations(sample: dict) -> dict:
         "min_r": _corr(sample["min"], d),
         "fb1_r": _corr(sample["fb1"], d),
         "box_r": _corr(sample["box"], d),
+        "norm7_r": _corr(sample["norm7"], d),
     }
 
 
@@ -574,15 +662,15 @@ def collect_details(moth_utils):
         np = None
 
     per_tax = []
-    keys = ("details", "pixel", "sharp", "sharp_log", "min", "fb1", "box")
+    keys = ("details", "pixel", "sharp", "sharp_log", "min", "fb1", "box", "norm7")
     pooled = {key: [] for key in keys}
     stats = {"tax_rated": 0, "tax_skipped": 0, "rated": 0, "no_metric": 0,
-             "fb_ok": 0, "box_ok": 0, "exp_enabled": np is not None}
+             "fb_ok": 0, "box_ok": 0, "norm7_ok": 0, "exp_enabled": np is not None}
     # Per-metric wall-clock timing, each ``[total_seconds, calls]``. pixel and
     # sharpness are recomputed from scratch (never read from the cache) so the
     # four metrics are timed on equal footing; the image file is warmed first so
     # the numbers reflect CPU work, not cold-disk reads.
-    timings = {key: [0.0, 0] for key in ("pixel", "sharp", "fb1", "box")}
+    timings = {key: [0.0, 0] for key in ("pixel", "sharp", "fb1", "box", "norm7")}
 
     def timed(key, fn, *a):
         t0 = time.perf_counter()
@@ -614,13 +702,15 @@ def collect_details(moth_utils):
             # Recompute pixel & sharpness from scratch (do not reuse the cache).
             pixel_raw = timed("pixel", moth_utils.pose_pixel_span, filename)
             sharp_raw = timed("sharp", moth_utils.compute_sharpness, filename)
-            # Experimental proxies, computed live off the original image.
-            fb1 = box = None
+            # Experimental proxies, computed live off the original / normalized image.
+            fb1 = box = norm7 = None
             if np is not None:
                 fb1 = timed("fb1", _image_fb_gradient, np, moth_utils, filename, row)
                 box = timed("box", _box_sharpness, np, moth_utils, filename)
+                norm7 = timed("norm7", _norm7_sharpness, np, moth_utils, filename)
                 stats["fb_ok"] += fb1 is not None
                 stats["box_ok"] += box is not None
+                stats["norm7_ok"] += norm7 is not None
 
             if pixel_raw is None or sharp_raw is None:
                 stats["no_metric"] += 1
@@ -636,25 +726,34 @@ def collect_details(moth_utils):
             sample["min"].append(min(s_pixels, s_sharp))
             sample["fb1"].append(fb1)
             sample["box"].append(box)
+            sample["norm7"].append(norm7)
 
         if not sample["details"]:
             continue
         stats["tax_rated"] += 1
         species = (moth_utils.get_name_info(tax_id).get("species") or "").strip()
+        n_bad = sum(1 for d in sample["details"] if d < SEP_GOOD_MIN)
         per_tax.append({
             "tax_id": tax_id,
             "species": species,
             "n": len(sample["details"]),
+            "bad": n_bad,
+            "good": len(sample["details"]) - n_bad,
             "corr": _correlations(sample),
+            "sep": _separability(sample),
         })
         for key in pooled:
             pooled[key].extend(sample[key])
 
     stats["timings"] = timings
+    pooled_bad = sum(1 for d in pooled["details"] if d < SEP_GOOD_MIN)
     overall = {
         "n": len(pooled["details"]),
         "tax_count": stats["tax_rated"],
+        "bad": pooled_bad,
+        "good": len(pooled["details"]) - pooled_bad,
         "corr": _correlations(pooled),
+        "sep": _separability(pooled),
         "sharp_calib": sharp_score_calibration(pooled["details"], pooled["sharp_log"]),
     }
     per_tax.sort(key=lambda r: (-r["n"], r["tax_id"]))
@@ -725,19 +824,22 @@ def render_details_md(per_tax, overall, stats) -> str:
         "- **box r** *(experimental)* — the same Scharr/Tenengrad gradient energy "
         "as the cached `sharp` metric, but on the **original** image at native "
         "resolution over the whole moth box (no resize); nothing stored.",
+        "- **n7 r** *(experimental)* — Scharr/Tenengrad energy of the **centre "
+        "cell of a 7×7 grid** over the pose-normalized thumbnail (the moth's "
+        "core, in a fixed frame); nothing stored.",
         "",
     ]
 
     if stats["exp_enabled"]:
         lines.append(
             f"Experimental metrics: `fb1` computed for {stats['fb_ok']} image(s), "
-            f"`box` for {stats['box_ok']} (others skipped for a missing image, "
-            "box or F/B keypoints)."
+            f"`box` for {stats['box_ok']}, `n7` for {stats['norm7_ok']} (others "
+            "skipped for a missing image, box, F/B keypoints or normalized crop)."
         )
     else:
         lines.append(
             "_Experimental metrics disabled: NumPy/Pillow not available, so the "
-            "`fb1 r`/`box r` columns are blank._"
+            "`fb1 r`/`box r`/`n7 r` columns are blank._"
         )
     lines.append("")
 
@@ -747,9 +849,9 @@ def render_details_md(per_tax, overall, stats) -> str:
         return "\n".join(lines)
 
     headers = ["tax_id", "species", "n",
-               "pixel r", "sharp r", "sharp r(log)", "min r", "fb1 r", "box r"]
-    aligns = ["l", "l", "r", "r", "r", "r", "r", "r", "r"]
-    corr_keys = ["pixel_r", "sharp_r", "sharp_r_log", "min_r", "fb1_r", "box_r"]
+               "pixel r", "sharp r", "sharp r(log)", "min r", "fb1 r", "box r", "n7 r"]
+    aligns = ["l", "l", "r", "r", "r", "r", "r", "r", "r", "r"]
+    corr_keys = ["pixel_r", "sharp_r", "sharp_r_log", "min_r", "fb1_r", "box_r", "norm7_r"]
 
     def data_row(tax_id, species, n, corr, bold=False):
         emph = (lambda s: f"**{s}**") if bold else (lambda s: s)
@@ -769,9 +871,99 @@ def render_details_md(per_tax, overall, stats) -> str:
     lines.extend(_md_table(headers, aligns, rows))
     lines.append("")
 
+    lines.extend(_render_separability(per_tax, overall))
     lines.extend(_render_sharp_calibration(overall.get("sharp_calib")))
     lines.extend(_render_timing(stats.get("timings")))
     return "\n".join(lines)
+
+
+def _fmt_thr(metric: str, sep) -> str:
+    """Format a metric's best-split threshold ("predict good when value > t")."""
+    if sep is None:
+        return "—"
+    t = sep["threshold"]
+    if t == float("-inf"):
+        return "all"  # no cut beats predicting everything good
+    if metric == "sharp":
+        return f"{t / 1e6:.3f}M"
+    if metric in ("pixel", "box", "norm7"):
+        return f"{t:.0f}"
+    return f"{t:.4f}"
+
+
+def _render_separability(per_tax, overall) -> list[str]:
+    """Two Markdown tables: per-taxon misjudged counts and the pooled cuts.
+
+    The first mirrors the correlation table (one cell per taxon x metric = the
+    fewest images a single best cut misjudges, each taxon at its own optimum);
+    the second lists the pooled optimum for every metric with the concrete cut
+    and its bad/good error split.
+    """
+    metric_labels = {"pixel": "pixel", "sharp": "sharp", "min": "min",
+                     "fb1": "fb1", "box": "box", "norm7": "n7"}
+
+    lines = [
+        "## Bad (1-2) vs good (3-5) separability",
+        "",
+        (
+            f"Each image is *bad* (rating 1-2) or *good* (rating {SEP_GOOD_MIN}-5). "
+            "For every metric we pick the single threshold that **minimises the "
+            "total misjudged** (bad above the cut + good below it), assuming a "
+            "higher value is better. Cells below are that minimum misjudged count "
+            "(lower = the metric separates bad from good better); `bad`/`good` are "
+            "the class sizes, so the trivial baseline is `min(bad, good)`. "
+            "`fb1`/`box` are judged over the subset where they exist. `sharp r(log)` "
+            "is omitted — a monotone transform cannot change the cut."
+        ),
+        "",
+    ]
+
+    # Table 1: per-taxon misjudged counts (each taxon at its own optimum).
+    headers = ["tax_id", "species", "n", "bad", "good",
+               *[metric_labels[m] for m in SEP_METRICS]]
+    aligns = ["l", "l", "r", "r", "r"] + ["r"] * len(SEP_METRICS)
+
+    def miss_cells(entry, bold=False):
+        emph = (lambda s: f"**{s}**") if bold else (lambda s: s)
+        cells = [emph(str(entry["n"])), emph(str(entry["bad"])), emph(str(entry["good"]))]
+        for metric in SEP_METRICS:
+            sep = entry["sep"].get(metric)
+            cells.append(emph("—" if sep is None else str(sep["miss"])))
+        return cells
+
+    rows = []
+    for r in per_tax:
+        rows.append([r["tax_id"], r["species"].replace("|", "\\|"), *miss_cells(r)])
+    rows.append(["All", f"_{overall['tax_count']} taxa_", *miss_cells(overall, bold=True)])
+    lines.extend(_md_table(headers, aligns, rows))
+    lines.append("")
+
+    # Table 2: the pooled optimum per metric, with the concrete cut + error split.
+    lines += [
+        "Pooled optimum over all rated images (the cut you'd actually harvest on):",
+        "",
+    ]
+    t_headers = ["metric", "cut (value >)", "misjudged", "bad→good", "good→bad", "n", "err %"]
+    t_aligns = ["l", "r", "r", "r", "r", "r", "r"]
+    t_rows = []
+    for metric in SEP_METRICS:
+        sep = overall["sep"].get(metric)
+        if sep is None:
+            t_rows.append([metric_labels[metric], "—", "—", "—", "—", "—", "—"])
+            continue
+        err = 100.0 * sep["miss"] / sep["n"] if sep["n"] else 0.0
+        t_rows.append([
+            metric_labels[metric],
+            _fmt_thr(metric, sep),
+            str(sep["miss"]),
+            str(sep["bad_as_good"]),
+            str(sep["good_as_bad"]),
+            str(sep["n"]),
+            f"{err:.1f}",
+        ])
+    lines.extend(_md_table(t_headers, t_aligns, t_rows))
+    lines.append("")
+    return lines
 
 
 def _fmt_m(value: float) -> str:
@@ -852,9 +1044,10 @@ def _render_timing(timings) -> list[str]:
         "sharp": "sharpness (cached-method, 1024² resize)",
         "fb1": "fb1 (F→B gradient)",
         "box": "box (native-res Scharr)",
+        "norm7": "norm7 (norm-thumb centre cell)",
     }
     rows = []
-    for key in ("pixel", "sharp", "fb1", "box"):
+    for key in ("pixel", "sharp", "fb1", "box", "norm7"):
         total, calls = timings.get(key, (0.0, 0))
         avg_ms = (total / calls * 1000.0) if calls else None
         rows.append([

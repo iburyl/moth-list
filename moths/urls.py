@@ -6,6 +6,7 @@ app_name = "moths"
 
 urlpatterns = [
     path("", views.index, name="index"),
+    path("search/", views.taxon_search, name="taxon_search"),
     path("browse/", views.browse, name="browse"),
     path("browse/<path:lineage>/", views.browse, name="browse"),
     path("observation/", views.observation_lookup, name="observation_lookup"),

@@ -17,11 +17,13 @@ from .paths import (
 )
 from .classes import (
     flags_suppress_normalization,
-    get_image_flags,
+    get_class_path,
 )
 from .annotations import (
     KEYPOINT_LABELS,
+    get_class_and_flags_with_source,
     get_pose_path,
+    get_prediction_class_path,
     get_prediction_path,
     load_pose_source,
 )
@@ -74,13 +76,19 @@ NORM_TOPDOWN_CROP_SCALE = 1.0 / NORM_TOPDOWN_CIRCLE_RADIUS
 # Side-view: output-y fraction the horizontal F→B line is placed on (lower-third
 # line), leaving room above for the raised wing.
 NORM_SIDE_FB_Y = 2.0 / 3.0
+# Simplified bounding-box fallback: the box's wider side fills this fraction of
+# the (square) crop, centred, with no rotation.
+NORM_BBOX_FILL = 0.9
 # Bump whenever the normalized-crop GEOMETRY changes (crop scale / circle radius,
 # centering, side-view placement, ...). The version is embedded in the cached
 # crop filename, so old-geometry crops are ignored and regenerated on the next
 # view (no manual cache wipe), and stale files are cleaned up on regeneration.
 # v1: unified 80% circle. v2: top-down back to the original 90% circle (radius
-# 0.45); side view stays on the 80% circle (radius 0.4).
-NORM_GEOM_VERSION = 2
+# 0.45); side view stays on the 80% circle (radius 0.4). v3: normalization is
+# stage-aware — non-adult / normalization-suppressed / F&B-less images get an
+# axis-aligned bounding-box crop; adults with F&B but no wing get the vertical
+# F→B layout.
+NORM_GEOM_VERSION = 3
 
 
 def _side_normalization(fx, fy, bx, by, lx, ly, rx, ry, l_present):
@@ -154,37 +162,61 @@ def _side_normalization(fx, fy, bx, by, lx, ly, rx, ry, l_present):
     return u_x, u_y, side, c, f
 
 
+def _bbox_normalization(ann, width: int, height: int):
+    """Axis-aligned square crop centred on the bounding box (no rotation).
+
+    The simplified fallback for images that don't get a pose layout (non-adult,
+    normalization-suppressed, or adult without usable F/B keypoints). Returns
+    ``(a, b, c, d, e, f, side)`` — the affine linear/translation terms plus the
+    square side in pixels — sized so the box's wider side fills
+    :data:`NORM_BBOX_FILL` of the crop and the box centre sits at the crop
+    centre. ``None`` when the box is degenerate.
+    """
+    bw, bh = ann.width * width, ann.height * height
+    if bw <= 0 or bh <= 0:
+        return None
+    cx, cy = ann.cx * width, ann.cy * height
+    side = max(1, int(round(max(bw, bh) / NORM_BBOX_FILL)))
+    a, d = 1.0, 0.0   # output +x -> input +x (no rotation)
+    b, e = 0.0, 1.0   # output +y -> input +y
+    half = side / 2
+    c = cx - (a + b) * half
+    f = cy - (d + e) * half
+    return a, b, c, d, e, f, side
+
+
 def compute_normalization(image_filename: str) -> dict | None:
-    """Geometry of the pose-normalized crop for an image.
+    """Geometry of the normalized crop for an image (a square, canonical frame).
 
-    The crop is a square, centred on C and rotated to a canonical orientation.
-    Two layouts are supported:
+    The layout depends on the image's (effective) stage, flags and keypoints:
 
-    * **Top-down / bottom-up** (all four F/B/L/R present): C is the F/B midpoint
-      and the F→B line is vertical (F on top, B on bottom). The side is
-      ``NORM_TOPDOWN_CROP_SCALE`` times the largest C→keypoint distance, so the
-      farthest keypoint lands on the 90% reference circle.
-    * **Side view** (F, B and exactly one wing): see
-      :func:`_side_normalization` — the F→B line is laid horizontal with F
-      facing the wing's side, on the image's lower-third line, scaled to the 80%
-      reference circle.
+    * **Side view** (Adult, F+B and exactly one wing): see
+      :func:`_side_normalization` — F→B laid horizontal with F facing the wing,
+      on the lower-third line, scaled to the 80% reference circle.
+    * **Vertical F→B** (Adult, F+B present, both wings or neither): C is the F/B
+      midpoint and F→B is vertical (F on top). The side is
+      ``NORM_TOPDOWN_CROP_SCALE`` times the largest C→(present keypoint)
+      distance, so the farthest known point lands on the 90% reference circle.
+      (Both wings = the classic top-down layout; neither wing = the same layout
+      sized on F/B alone.)
+    * **Bounding box** (non-adult, normalization-suppressed by a flag, or adult
+      without usable F/B): a simplified axis-aligned crop centred on the box,
+      scaled so its wider side fills 90% of the square — see
+      :func:`_bbox_normalization`. No reference circle.
 
-    Returns ``None`` when it can't be determined (missing prediction, keypoints,
-    or original image size). The returned dict has:
+    Returns ``None`` only when there is no annotation/box at all or the original
+    image size is unavailable. The returned dict has:
 
     * ``side`` – the square side in pixels
     * ``affine`` – ``(a, b, c, d, e, f)`` mapping *output* (normalized crop) to
       *input* (original image) pixels, for ``Image.transform(..., AFFINE)``
     * ``circle_radius`` – the reference-circle radius as a fraction of the side
-      (0.45 top-down / 0.4 side), so the view can draw the matching circle
+      (0.45 vertical / 0.4 side), or ``None`` for the bounding-box layout
+    * ``mode`` – ``"side"`` / ``"vertical"`` / ``"top-down"`` / ``"bbox"``
     * ``keypoints`` – the first object's keypoints re-expressed as fractions of
       the normalized crop: ``{"x", "y", "v", "label"}`` (``x``/``y`` are
       ``None`` when the keypoint is unlabeled)
     """
-    # Flags like "Mating" opt an image out of normalization entirely.
-    if flags_suppress_normalization(get_image_flags(image_filename)):
-        return None
-
     size = get_image_size(image_filename)
     if size is None:
         return None
@@ -193,54 +225,76 @@ def compute_normalization(image_filename: str) -> dict | None:
     annotations, _source = load_pose_source(image_filename)
     if not annotations:
         return None
-    keypoints = annotations[0].keypoints
-    if len(keypoints) < 4:
-        return None
-    front, left, right, back = keypoints[0], keypoints[1], keypoints[2], keypoints[3]
-    if front.visibility <= 0 or back.visibility <= 0:
-        return None
+    ann = annotations[0]
+    keypoints = ann.keypoints
 
-    fx, fy = front.x * width, front.y * height
-    bx, by = back.x * width, back.y * height
-    lx, ly = left.x * width, left.y * height
-    rx, ry = right.x * width, right.y * height
+    # Effective stage/flags (hand-preferred, else prediction) decide the layout,
+    # matching how the poses view groups the image.
+    stage, flags, _cls_source = get_class_and_flags_with_source(image_filename)
+    is_adult = stage == "Adult"
+    suppressed = flags_suppress_normalization(flags)
+    have_fb = (
+        len(keypoints) >= 4
+        and keypoints[0].visibility > 0
+        and keypoints[3].visibility > 0
+    )
 
-    l_present = left.visibility > 0
-    r_present = right.visibility > 0
     # Affine samples from the ORIGINAL image (output -> input mapping), so no
-    # pixels are clipped by an intermediate rotate step. The linear columns are
-    # the input-space directions output +x / +y map to (unit-length, orthonormal
-    # with det +1), so it's always a pure rotation — never a mirror/flip. Areas
-    # outside the source are filled grey.
-    if l_present and r_present:
-        # Both wings: top-down layout — F→B vertical, F on top, centred on the
-        # F/B midpoint; the farthest keypoint sits on the reference circle.
-        cx, cy = (fx + bx) / 2, (fy + by) / 2
-        length = math.hypot(bx - fx, by - fy) or 1.0
-        ux, uy = (bx - fx) / length, (by - fy) / length
-        u_x, u_y = (uy, -ux), (ux, uy)  # output +x perpendicular, +y along F→B
-        pts = [(fx, fy), (bx, by), (lx, ly), (rx, ry)]
-        max_dist = max(math.hypot(px - cx, py - cy) for px, py in pts)
-        side = max(1, int(round(NORM_TOPDOWN_CROP_SCALE * max_dist)))
-        half = side / 2
-        a, d = u_x
-        b, e = u_y
-        c = cx - (a + b) * half
-        f = cy - (d + e) * half
-        circle_radius = NORM_TOPDOWN_CIRCLE_RADIUS
-    elif l_present != r_present:
-        # Exactly one wing: side view (F→B on the lower-third line).
-        u_x, u_y, side, c, f = _side_normalization(
-            fx, fy, bx, by, lx, ly, rx, ry, l_present
-        )
-        a, d = u_x
-        b, e = u_y
-        circle_radius = NORM_SIDE_CIRCLE_RADIUS
-    else:
-        return None
+    # pixels are clipped by an intermediate rotate step. The pose layouts use
+    # orthonormal (det +1) linear columns — always a pure rotation, never a
+    # mirror/flip. Areas outside the source are filled grey.
+    if is_adult and not suppressed and have_fb:
+        front, left, right, back = keypoints[0], keypoints[1], keypoints[2], keypoints[3]
+        fx, fy = front.x * width, front.y * height
+        bx, by = back.x * width, back.y * height
+        lx, ly = left.x * width, left.y * height
+        rx, ry = right.x * width, right.y * height
+        l_present = left.visibility > 0
+        r_present = right.visibility > 0
 
-    # Inverse (input -> output): the linear part is orthonormal, so its inverse
-    # is its transpose. Used to place keypoints on the normalized crop.
+        if l_present != r_present:
+            # Exactly one wing: side view (F→B on the lower-third line).
+            u_x, u_y, side, c, f = _side_normalization(
+                fx, fy, bx, by, lx, ly, rx, ry, l_present
+            )
+            a, d = u_x
+            b, e = u_y
+            circle_radius = NORM_SIDE_CIRCLE_RADIUS
+            mode = "side"
+        else:
+            # Both wings (top-down) or neither (other adult): F→B vertical, F on
+            # top, centred on the F/B midpoint; the farthest *present* keypoint
+            # sits on the reference circle.
+            cx, cy = (fx + bx) / 2, (fy + by) / 2
+            length = math.hypot(bx - fx, by - fy) or 1.0
+            ux, uy = (bx - fx) / length, (by - fy) / length
+            u_x, u_y = (uy, -ux), (ux, uy)  # output +x perpendicular, +y along F→B
+            pts = [(fx, fy), (bx, by)]
+            if l_present:
+                pts.append((lx, ly))
+            if r_present:
+                pts.append((rx, ry))
+            max_dist = max(math.hypot(px - cx, py - cy) for px, py in pts)
+            side = max(1, int(round(NORM_TOPDOWN_CROP_SCALE * max_dist)))
+            half = side / 2
+            a, d = u_x
+            b, e = u_y
+            c = cx - (a + b) * half
+            f = cy - (d + e) * half
+            circle_radius = NORM_TOPDOWN_CIRCLE_RADIUS
+            mode = "top-down" if (l_present and r_present) else "vertical"
+    else:
+        # Simplified bounding-box crop (non-adult / suppressed / no F&B).
+        bbox = _bbox_normalization(ann, width, height)
+        if bbox is None:
+            return None
+        a, b, c, d, e, f, side = bbox
+        circle_radius = None
+        mode = "bbox"
+
+    # Inverse (input -> output): the linear part is orthonormal (pose) or the
+    # identity (bbox), so its inverse is its transpose. Places keypoints on the
+    # normalized crop.
     def to_crop(px: float, py: float) -> tuple[float, float]:
         return (a * (px - c) + d * (py - f), b * (px - c) + e * (py - f))
 
@@ -259,6 +313,7 @@ def compute_normalization(image_filename: str) -> dict | None:
         "side": side,
         "affine": (a, b, c, d, e, f),
         "circle_radius": circle_radius,
+        "mode": mode,
         "keypoints": mapped,
     }
 
@@ -292,8 +347,15 @@ def get_or_create_normalized(image_filename: str):
 
     cache_dir, norm_path, thumb_path = _normalized_paths(image_filename)
 
+    # Depend on the pose sources *and* the class sidecars: the layout is now
+    # stage/flag-aware, so a stage or flag change must invalidate the crop too.
     dep_mtime = src.stat().st_mtime
-    for source_path in (get_pose_path(image_filename), get_prediction_path(image_filename)):
+    for source_path in (
+        get_pose_path(image_filename),
+        get_prediction_path(image_filename),
+        get_class_path(image_filename),
+        get_prediction_class_path(image_filename),
+    ):
         if source_path.is_file():
             dep_mtime = max(dep_mtime, source_path.stat().st_mtime)
 

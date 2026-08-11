@@ -170,6 +170,7 @@ from .posedata import (
     load_pose_data_raw,
     mark_pose_row_stale,
     pose_data_version_ok,
+    pose_row_needs_rebuild,
     refresh_tax_thumbnail,
     set_pose_row_flags,
     verify_pose_row,

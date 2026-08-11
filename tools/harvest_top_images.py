@@ -37,8 +37,8 @@ folder (``ultralytics-predict.py`` etc.): the environment must set every
 ``MOTHS_*`` path (no defaults). ``MOTHS_IMAGE_DIR`` holds the photos plus
 ``<tax>_observations.json``, ``MOTHS_PREDICTION_DIR`` the predicted keypoint
 ``.txt`` files, ``MOTHS_LABEL_DIR`` the ``<tax>_pose_data.json``
-(pose/metrics/scores), ``MOTHS_THUMBNAIL_DIR`` the normalized-crop cache and
-``MOTHS_CLASS_DIR`` the ``<name>.class`` stage labels. Keypoints live only in
+(pose/metrics/scores) plus the ``<name>.class`` stage labels, and
+``MOTHS_THUMBNAIL_DIR`` the normalized-crop cache. Keypoints live only in
 the prediction dir and pose data only in the labels dir;
 ``<tax>_observations.json`` stays pure observation metadata.
 
@@ -743,7 +743,12 @@ def run_taxon(taxon_id, args, moth_utils, inat, session, load_models) -> None:
                 existing_ids.add(int(image.obs_id))
             except (TypeError, ValueError):
                 existing_ids.add(image.obs_id)
-            stage = moth_utils.get_image_class(image.filename)
+            # Harvested stages live in the prediction dir now, so resolve the
+            # stage source-aware (hand class first, then prediction) to keep
+            # counting preserved images toward the quotas on a force re-run.
+            stage, _flags, _source = moth_utils.get_class_and_flags_with_source(
+                image.filename
+            )
             if stage in stage_counts:
                 stage_counts[stage] += 1
             elif stage == "Adult":
@@ -876,7 +881,11 @@ def run_taxon(taxon_id, args, moth_utils, inat, session, load_models) -> None:
                     log_status(observation, "download_failed")
                     continue
                 downloaded += 1
-                moth_utils.set_image_class(dest.name, stage)
+                # Record the stage as a prediction (prediction-dir .class), not
+                # a hand label, so harvested stages never look manually set.
+                moth_utils._write_class_file(
+                    moth_utils.get_prediction_class_path(dest.name), stage, []
+                )
                 stage_counts[stage] += 1
                 stage_items.append(item)
                 log_status(observation, "taken")
@@ -998,8 +1007,12 @@ def run_taxon(taxon_id, args, moth_utils, inat, session, load_models) -> None:
                 continue
 
             newline_if_needed()
-            # A kept top-down/side specimen is an adult; label it accordingly.
-            moth_utils.set_image_class(filename, "Adult")
+            # A kept top-down/side specimen is an adult, but the stage stays a
+            # *prediction*: write_prediction already recorded stage "Adult" (+
+            # any Pinned/Macro flag) in the prediction-dir .class, so we do NOT
+            # write a hand class here. Keeping harvested stages out of the hand
+            # .class in MOTHS_LABEL_DIR preserves the label-vs-prediction
+            # distinction (a hand class there means a human set it).
             # observations.json stays pure observation metadata; the pose/
             # metrics/keypoints live in the prediction .txt (test dir) and
             # {tax}_pose_data.json (labels dir), matching the Django layout.

@@ -14,6 +14,35 @@ from .annotations import (
 )
 
 
+# --- Per-metric cache versions -----------------------------------------------
+# Each metric carries its own version so that changing one metric's computation
+# only invalidates that metric's cached values (a rebuild recomputes just it and
+# leaves the others' cached numbers untouched, and the normalized view can
+# lazily refresh the cheap ones per image). Bump the relevant constant below
+# whenever that metric's formula/scaling changes. The versions in force at build
+# time are recorded in ``<tax_id>_pose_data.json`` (file-level
+# ``metric_versions``, plus a per-image override when a single row is refreshed
+# out-of-band). A cache with no recorded version is assumed to already hold the
+# current values — this scheme shipped with the v17 formulas, so pre-scheme
+# files are not needlessly recomputed.
+SYMMETRY_VERSION = 1
+# v2: only a keypoint *pair* (F/B or L/R) need be visible (was all four), and a
+# box-only annotation falls back to max(box w, box h) * 0.9.
+PIXEL_SPAN_VERSION = 2
+SHARPNESS_VERSION = 1
+METRIC_VERSIONS = {
+    "symmetry": SYMMETRY_VERSION,
+    "pixel_span": PIXEL_SPAN_VERSION,
+    "sharpness": SHARPNESS_VERSION,
+}
+# Versions the pre-scheme caches (the v17 pose data, before per-metric
+# versioning) were computed at — all metrics shipped at version 1. A cache with
+# no recorded ``metric_versions`` is assumed to hold *these*, so a later bump of
+# any constant above still triggers that metric's recompute (and the per-plate
+# "rebuild" note) rather than being mistaken for current.
+LEGACY_METRIC_VERSIONS = {"symmetry": 1, "pixel_span": 1, "sharpness": 1}
+
+
 def annotation_symmetry(
     annotation: Annotation,
     width: float = 1.0,
@@ -90,31 +119,41 @@ def pose_symmetry_metric(image_filename: str) -> float | None:
 
 
 def pose_pixel_span(image_filename: str) -> float | None:
-    """Largest pixel span among the L↔R and F↔B keypoint pairs (first prediction).
+    """Approximate on-image extent of the first annotation, in pixels.
 
-    Normalized keypoint distances are scaled by the original image size, so the
-    result approximates how many pixels of detail the pose spans. Returns
-    ``None`` when it can't be computed (no pose, missing keypoints, or the
-    original image size is unavailable).
+    Keypoint poses use the larger of the two keypoint-pair spans, F↔B and L↔R,
+    scaled to pixels by the original image size. Only a *pair* need be visible
+    (not all four points): a side view with just F/B contributes its F↔B span, a
+    view with just both wings contributes L↔R. When neither pair is fully
+    visible (e.g. a box-only annotation) it falls back to the bounding box,
+    ``max(box_width_px, box_height_px) * 0.9`` (the 0.9 discounts the box's
+    padding around the moth). Returns ``None`` when nothing can be measured (no
+    annotation, or the original image size is unavailable).
     """
     annotations, _source = load_pose_source(image_filename)
     if not annotations:
         return None
-    keypoints = annotations[0].keypoints
-    if len(keypoints) < 4:
-        return None
-    front, left, right, back = keypoints[0], keypoints[1], keypoints[2], keypoints[3]
-    if min(front.visibility, left.visibility, right.visibility, back.visibility) <= 0:
-        return None
-
     size = get_image_size(image_filename)
     if size is None:
         return None
     width, height = size
+    ann = annotations[0]
 
-    lr = math.hypot((right.x - left.x) * width, (right.y - left.y) * height)
-    fb = math.hypot((back.x - front.x) * width, (back.y - front.y) * height)
-    return max(lr, fb)
+    spans = []
+    keypoints = ann.keypoints
+    if len(keypoints) >= 4:
+        front, left, right, back = keypoints[0], keypoints[1], keypoints[2], keypoints[3]
+        if left.visibility > 0 and right.visibility > 0:
+            spans.append(math.hypot((right.x - left.x) * width, (right.y - left.y) * height))
+        if front.visibility > 0 and back.visibility > 0:
+            spans.append(math.hypot((back.x - front.x) * width, (back.y - front.y) * height))
+    if spans:
+        return max(spans)
+
+    # No visible keypoint pair: fall back to the bounding box extent.
+    if ann.width > 0 and ann.height > 0:
+        return max(ann.width * width, ann.height * height) * 0.9
+    return None
 
 
 # Sharpness settings. The metric is measured on the central 3x3 cells of a 5x5
@@ -127,11 +166,12 @@ SHARPNESS_CENTER_FRAC = 3.0 / 5.0  # central 3 of a 5x5 split, per axis
 # POSE_DATA_VERSION when the scoring method below changes so those are rebuilt.
 
 # Sharpness -> 0..1 score calibration: a straight line in ``log(sharpness)``,
-# ``clamp(a*ln(sharpness) + b, 0, 1)``. Fitted against the hand 1-5 *details*
-# ratings (see tools/metrics_statistics.py --details-md) so that the sharpness
-# typical of a ~2.5-star image scores 0.5 and a ~4.5-star image scores 1.0.
-SHARPNESS_SCORE_A = 0.346483
-SHARPNESS_SCORE_B = -2.824179
+# ``clamp(a*ln(sharpness) + b, 0, 1)``. Anchored (informed by the hand details
+# ratings, see tools/metrics_statistics.py --details-md) so that
+# ``log(sharpness) == 9`` scores 0.5 and ``log(sharpness) == 11`` scores 1.0:
+# a = 0.5 / (11 - 9) = 0.25, b = 0.5 - a*9 = -1.75.
+SHARPNESS_SCORE_A = 0.25
+SHARPNESS_SCORE_B = -1.75
 
 
 def compute_sharpness(image_filename: str) -> float | None:
@@ -234,14 +274,14 @@ def cumulative_score(
     pixel_span: float | None,
     sharpness: float | None,
 ) -> float | None:
-    """Combined quality score (minimum of the three sub-scores); ``None`` if any
-    input is missing.
+    """Combined quality score: the minimum across the *available* sub-scores.
 
-    Using the minimum rather than the sum makes the score a weakest-link
-    measure: an image only scores well when *every* metric is good, and a single
-    poor metric caps the total.
+    Using the minimum makes the score a weakest-link measure — an image only
+    scores well when every metric it has is good, and a single poor metric caps
+    the total. Metrics whose input is missing are simply skipped, so any image
+    with at least one valid sub-score gets a score; ``None`` only when none of
+    the three could be computed.
     """
-    if symmetry is None or pixel_span is None or sharpness is None:
-        return None
     s_sym, s_pixels, s_sharp = score_components(symmetry, pixel_span, sharpness)
-    return min(s_sym, s_pixels, s_sharp)
+    available = [s for s in (s_sym, s_pixels, s_sharp) if s is not None]
+    return min(available) if available else None

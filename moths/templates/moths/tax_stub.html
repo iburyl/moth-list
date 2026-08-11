@@ -1,0 +1,31 @@
+{% extends "moths/base.html" %}
+
+{% block title %}
+    {% if unknown %}Unknown taxon{% else %}No data{% endif %} — Moths List
+{% endblock %}
+
+{% block content %}
+    <h2 class="tax-heading">
+        {% if species %}{{ species }}{% else %}Taxon {{ tax_id }}{% endif %}
+    </h2>
+
+    {% if unknown %}
+        <p class="muted">
+            Taxon <code>{{ tax_id }}</code> is not in the taxonomy list, so there
+            is nothing to show for it here.
+        </p>
+    {% else %}
+        <p class="muted">
+            No data yet for
+            {% if species %}<strong>{{ species }}</strong>{% else %}this taxon{% endif %}
+            (<code>{{ tax_id }}</code>){% if name %} — {{ name }}{% endif %}.
+            No observations have been collected and no summary has been built.
+        </p>
+    {% endif %}
+
+    <p class="muted" style="margin-top: 1rem;">
+        <a href="https://www.inaturalist.org/taxa/{{ tax_id }}" target="_blank" rel="noopener">
+            View taxon on iNaturalist &#8599;
+        </a>
+    </p>
+{% endblock %}

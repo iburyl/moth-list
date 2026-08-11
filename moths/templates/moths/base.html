@@ -20,11 +20,37 @@
             display: flex; align-items: center; justify-content: space-between; gap: 1rem;
         }
         header h1 { margin: 0; font-size: 1.4rem; }
+        .header-tools { display: flex; align-items: center; gap: 0.6rem; }
         .header-btn {
             padding: 0.35rem 0.9rem; border: 1px solid #8884; border-radius: 6px;
             background: #8881; color: inherit; font-size: 0.9rem;
         }
         .header-btn:hover { border-color: #2563eb; text-decoration: none; }
+
+        /* Global taxon search (header autocomplete). */
+        .tax-search { position: relative; }
+        .tax-search input {
+            font: inherit; font-size: 0.9rem; width: 15rem; max-width: 42vw;
+            padding: 0.35rem 0.7rem; border: 1px solid #8884; border-radius: 6px;
+            background: Canvas; color: CanvasText;
+        }
+        .tax-search input:focus { outline: none; border-color: #2563eb; }
+        .tax-search-list {
+            position: absolute; top: calc(100% + 4px); right: 0; left: 0;
+            margin: 0; padding: 0.25rem 0; list-style: none; z-index: 50;
+            background: Canvas; color: CanvasText;
+            border: 1px solid #8884; border-radius: 6px;
+            box-shadow: 0 6px 20px #0004; max-height: 60vh; overflow: auto;
+        }
+        .tax-search-list li {
+            padding: 0.35rem 0.7rem; cursor: pointer;
+            display: flex; align-items: baseline; justify-content: space-between;
+            gap: 0.75rem;
+        }
+        .tax-search-list li.active,
+        .tax-search-list li:hover { background: #2563eb22; }
+        .tax-search-list .s-label { font-size: 0.9rem; }
+        .tax-search-list .s-detail { color: #6b7280; font-size: 0.78rem; white-space: nowrap; }
         a { color: #2563eb; text-decoration: none; }
         a:hover { text-decoration: underline; }
         .muted { color: #6b7280; font-size: 0.9rem; }
@@ -51,8 +77,119 @@
 <body>
     <header>
         <h1><a href="{% url 'moths:index' %}">Moths List</a></h1>
-        <a class="header-btn" href="{% url 'moths:observation_lookup' %}">id</a>
+        <div class="header-tools">
+            <div class="tax-search" data-url="{% url 'moths:taxon_search' %}">
+                <input type="text" id="tax-search-input" placeholder="Search taxa&hellip;"
+                       autocomplete="off" spellcheck="false"
+                       aria-label="Search taxa">
+                <ul class="tax-search-list" id="tax-search-list" hidden></ul>
+            </div>
+            <a class="header-btn" href="{% url 'moths:observation_lookup' %}">id</a>
+        </div>
     </header>
     {% block content %}{% endblock %}
+    <script>
+    // Header taxon search: debounced autocomplete (max 5). Enter navigates to the
+    // highlighted option, or (no selection) the top result — exact match first,
+    // otherwise the highest-rank candidate, as ordered by the server.
+    (function () {
+        var box = document.querySelector(".tax-search");
+        if (!box) return;
+        var url = box.dataset.url;
+        var input = document.getElementById("tax-search-input");
+        var list = document.getElementById("tax-search-list");
+        var results = [];
+        var active = -1;
+        var seq = 0;
+
+        function hide() { list.hidden = true; list.innerHTML = ""; active = -1; }
+
+        function render() {
+            list.innerHTML = "";
+            if (!results.length) { hide(); return; }
+            results.forEach(function (r, i) {
+                var li = document.createElement("li");
+                li.dataset.index = i;
+                if (i === active) li.className = "active";
+                var label = document.createElement("span");
+                label.className = "s-label";
+                label.textContent = r.label;
+                var detail = document.createElement("span");
+                detail.className = "s-detail";
+                detail.textContent = r.detail || r.kind;
+                li.appendChild(label);
+                li.appendChild(detail);
+                li.addEventListener("mousedown", function (e) {
+                    e.preventDefault();  // keep focus so blur doesn't fire first
+                    go(r.url);
+                });
+                list.appendChild(li);
+            });
+            list.hidden = false;
+        }
+
+        function go(target) { if (target) window.location.href = target; }
+
+        function fetchResults(q) {
+            var mine = ++seq;
+            return fetch(url + "?q=" + encodeURIComponent(q), {
+                headers: { "X-Requested-With": "XMLHttpRequest" },
+            })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    if (mine !== seq) return null;  // a newer request superseded us
+                    results = (data && data.results) || [];
+                    return results;
+                })
+                .catch(function () { return null; });
+        }
+
+        var timer = null;
+        input.addEventListener("input", function () {
+            var q = input.value.trim();
+            clearTimeout(timer);
+            if (!q) { results = []; hide(); return; }
+            timer = setTimeout(function () {
+                fetchResults(q).then(function (rows) {
+                    if (rows === null) return;
+                    active = -1;
+                    render();
+                });
+            }, 150);
+        });
+
+        input.addEventListener("keydown", function (e) {
+            if (e.key === "ArrowDown") {
+                if (!results.length) return;
+                active = (active + 1) % results.length;
+                render();
+                e.preventDefault();
+            } else if (e.key === "ArrowUp") {
+                if (!results.length) return;
+                active = (active - 1 + results.length) % results.length;
+                render();
+                e.preventDefault();
+            } else if (e.key === "Enter") {
+                e.preventDefault();
+                if (active >= 0 && results[active]) { go(results[active].url); return; }
+                var q = input.value.trim();
+                if (!q) return;
+                // No highlight: resolve fresh so a fast Enter still lands right.
+                fetchResults(q).then(function (rows) {
+                    if (rows && rows.length) go(rows[0].url);
+                });
+            } else if (e.key === "Escape") {
+                hide();
+            }
+        });
+
+        input.addEventListener("focus", function () {
+            if (results.length) render();
+        });
+        document.addEventListener("click", function (e) {
+            if (!box.contains(e.target)) hide();
+        });
+    })();
+    </script>
 </body>
 </html>

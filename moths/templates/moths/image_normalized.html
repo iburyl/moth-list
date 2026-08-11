@@ -189,18 +189,23 @@
                 return { x: 2 * px - l.x, y: 2 * py - l.y };
             }
 
+            // The bounding-box layout has no reference circle (empty data attr).
+            var hasCircle = overlayEl.dataset.circlePct !== ""
+                && !isNaN(parseFloat(overlayEl.dataset.circlePct));
             var circlePct = parseFloat(overlayEl.dataset.circlePct) || 90;
             var circleOffset = parseFloat(overlayEl.dataset.circleOffset) || 5;
 
             function renderOverlay() {
                 overlayEl.innerHTML = "";
-                var circle = document.createElement("div");
-                circle.className = "norm-circle";
-                circle.style.left = circleOffset + "%";
-                circle.style.top = circleOffset + "%";
-                circle.style.width = circlePct + "%";
-                circle.style.height = circlePct + "%";
-                overlayEl.appendChild(circle);
+                if (hasCircle) {
+                    var circle = document.createElement("div");
+                    circle.className = "norm-circle";
+                    circle.style.left = circleOffset + "%";
+                    circle.style.top = circleOffset + "%";
+                    circle.style.width = circlePct + "%";
+                    circle.style.height = circlePct + "%";
+                    overlayEl.appendChild(circle);
+                }
                 normKps.forEach(function (kp) {
                     if (kp.v <= 0 || kp.x === null || kp.y === null) return;
                     var dot = document.createElement("div");

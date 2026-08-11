@@ -110,8 +110,12 @@ _DETAILS_PREFIX = "details:"
 
 
 def get_class_dir() -> Path:
-    """Directory holding per-image stage classification files."""
-    return Path(settings.MOTHS_CLASS_DIR)
+    """Directory holding per-image stage classification (``.class``) files.
+
+    The hand ``.class`` sidecars live alongside the ``.txt`` pose labels in
+    ``MOTHS_LABEL_DIR`` (the two used to be split across separate folders).
+    """
+    return Path(settings.MOTHS_LABEL_DIR)
 
 
 def get_class_path(image_filename: str) -> Path:

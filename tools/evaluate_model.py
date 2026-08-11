@@ -10,8 +10,8 @@ predicted labels on disk are ignored; every prediction is recomputed live.
 Directories come from Django (the environment must set every ``MOTHS_*`` path,
 exactly like the web app / the other tools). Only the images and hand labels
 are read: ``MOTHS_IMAGE_DIR`` for the photos and ``MOTHS_LABEL_DIR`` for the
-reference ``.txt`` pose files; the hand stage sidecar (``MOTHS_CLASS_DIR``)
-supplies the Larva ground truth.
+reference ``.txt`` pose files; the hand stage sidecar (the ``<name>.class`` in
+``MOTHS_LABEL_DIR``) supplies the Larva ground truth.
 
 The three models are passed on the command line::
 

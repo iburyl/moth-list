@@ -43,10 +43,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Per-image steps to time inside build_pose_data, as (label, moths.utils name).
-# These are the functions compute_pose_row / build_pose_data call per image; the
-# re-entrancy guard in StepTimer attributes any nested wrapped call to the
-# outermost step, so the labels below partition the time without overlap.
+# Per-image steps to time inside build_pose_data, as (label, posedata name).
+# These are the functions compute_pose_row / build_pose_data call per image
+# (looked up in the moths.utils.posedata namespace); the re-entrancy guard in
+# StepTimer attributes any nested wrapped call to the outermost step, so the
+# labels below partition the time without overlap.
 POSE_STEPS = [
     ("keypoints", "_pose_source_keypoints"),
     ("classify", "classify_pose"),
@@ -54,10 +55,12 @@ POSE_STEPS = [
     ("symmetry", "pose_symmetry_metric"),
     ("pixels", "pose_pixel_span"),
     ("sharpness", "compute_sharpness"),
-    ("flags", "get_image_flags"),
+    ("flags", "get_class_and_flags_with_source"),
     ("crop", "touch_normalized"),
     ("crop", "clear_normalized"),
     ("thumb", "refresh_tax_thumbnail"),
+    ("wing", "build_wing_stats"),
+    ("wing", "build_side_wing_stats"),
     ("write", "_write_pose_data"),
 ]
 
@@ -74,6 +77,7 @@ STEP_ORDER = [
     "flags",
     "crop",
     "thumb",
+    "wing",
     "write",
     "summary",
 ]
@@ -117,11 +121,16 @@ class StepTimer:
 def install_timer(moth_utils, timer: StepTimer) -> None:
     """Monkey-patch the per-image pose functions with timing wrappers.
 
-    ``compute_pose_row`` refers to these as module globals, so replacing the
-    module attributes makes it call the wrappers without any app-code change.
+    ``compute_pose_row`` / ``build_pose_data`` live in ``moths.utils.posedata``
+    and look these names up in *that* module's namespace (each is imported into,
+    or defined in, posedata), so the wrappers must replace the attributes on the
+    posedata submodule. Patching the ``moths.utils`` package re-exports instead
+    would leave posedata's own references untouched — the bug that made every
+    per-step timing read 0.000 while the total stayed large.
     """
+    posedata = moth_utils.posedata
     for label, attr in POSE_STEPS:
-        setattr(moth_utils, attr, timer.wrap(label, getattr(moth_utils, attr)))
+        setattr(posedata, attr, timer.wrap(label, getattr(posedata, attr)))
 
 
 def bootstrap_django():

@@ -215,8 +215,9 @@ def get_predicted_class_and_flags(image_filename: str) -> tuple[str | None, list
 def get_class_and_flags_with_source(image_filename: str) -> tuple[str | None, list[str], str | None]:
     """Return ``(stage, flags, source)``, preferring the hand ``.class`` file.
 
-    Reads ``MOTHS_CLASS_DIR`` first (``source == "class"``); when that file has
-    neither a stage nor flags, falls back to the predicted ``.class`` in
+    Reads the hand ``.class`` in ``MOTHS_LABEL_DIR`` first (``source ==
+    "class"``); when that file has neither a stage nor flags, falls back to the
+    predicted ``.class`` in
     ``MOTHS_PREDICTION_DIR`` (``source == "prediction"``). ``source`` is ``None``
     when neither has any classification. Only the hand file is authoritative:
     once it carries any stage/flag it is used as-is (predictions are not merged

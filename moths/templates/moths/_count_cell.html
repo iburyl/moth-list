@@ -1,8 +1,7 @@
 {% comment %}
 Partial for one index-table count cell: a single total that links to the
 filtered poses view. Expects `count`, `tax_id`, `qkey` and `qval` from the
-includer. An optional `color` sets the number's colour (used to show class
-source). A zero renders dimmed with no link.
+includer. A zero renders dimmed with no link.
 An unknown value (``count`` is ``None``, e.g. no summary built yet) renders as
 a dimmed em dash.
-{% endcomment %}{% if count %}<a class="part"{% if color %} style="color:{{ color }}"{% endif %} href="{% url 'moths:pose_view' tax_id %}?{{ qkey }}={{ qval|urlencode }}" title="{{ qval }}">{{ count }}</a>{% elif count == 0 %}<span class="zero">0</span>{% else %}<span class="zero">—</span>{% endif %}
+{% endcomment %}{% if count %}<a class="part" href="{% url 'moths:pose_view' tax_id %}?{{ qkey }}={{ qval|urlencode }}" title="{{ qval }}">{{ count }}</a>{% elif count == 0 %}<span class="zero">0</span>{% else %}<span class="zero">—</span>{% endif %}

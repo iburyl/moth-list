@@ -8,20 +8,21 @@ from pathlib import Path
 from .paths import (
     get_image_size,
     image_basename,
-    scan_tax_images,
 )
 from .classes import (
     FLAGS,
-    get_image_flags,
     load_starred,
 )
 from .annotations import (
     POSE_TOP_DOWN,
     _pose_source_keypoints,
     classify_pose,
+    get_class_and_flags_with_source,
     get_label_dir,
 )
 from .metrics import (
+    LEGACY_METRIC_VERSIONS,
+    METRIC_VERSIONS,
     compute_sharpness,
     cumulative_score,
     pose_pixel_span,
@@ -133,40 +134,150 @@ def refresh_tax_thumbnail(tax_id: str, per_image: dict | None = None) -> str | N
 # uncertainty via keypoint visibility, so no source-based collapse remains.
 # v16: sharpness sub-score is now a log-linear fit to the hand details ratings
 # (clamp(a*ln(sharpness)+b, 0, 1)) instead of ``min(sharpness, 30000)/30000``.
-POSE_DATA_VERSION = 16
+# v17: sharpness score re-anchored to log(sharpness) 9->0.5, 11->1.0
+# (a=0.25, b=-1.75) — a gentler low end than the fitted line.
+# NOTE: from here on, changes to an individual metric's computation are tracked
+# by that metric's own version (see moths.utils.metrics.METRIC_VERSIONS), which
+# is recorded in the file (``metric_versions``) and lets a rebuild recompute
+# only the changed metric. Bump POSE_DATA_VERSION only for *structural* row
+# schema changes (not for metric formula tweaks). Pre-metric-version files (no
+# ``metric_versions`` key) are assumed to hold the v17-current metric values.
+POSE_DATA_VERSION = 17
 
 
-def compute_pose_row(image_filename: str) -> dict:
-    """Compute the pose class, metrics and score for one image (the slow path).
+# Sentinel version for a cached metric that must be recomputed on the next
+# explicit rebuild (e.g. a heavy metric the light path could not refresh after
+# the keypoints changed). It never matches a real (>=1) metric version.
+_STALE_METRIC_VERSION = 0
 
-    Records the ``source`` (``pose``/``prediction``/``None``) and the raw
-    keypoints used, so a later visit can detect when they've changed. Also
-    records the original image ``width``/``height`` (``None`` when unavailable),
-    persisting the intrinsic size here instead of a ``.size`` sidecar file.
-    Sharpness is measured on the bounding box centre of the original image, so
-    it is computed for any annotated image (see :func:`compute_sharpness`).
+
+def _pose_inputs(image_filename: str):
+    """Snapshot cached per row: keypoints/source plus effective stage/flags.
+
+    Stage and flags are the source-aware values (hand class, else prediction),
+    so the cache records what the app actually treats the image as. The metric
+    values depend only on the keypoints/box, so metric reuse keys on
+    keypoints/source; stage and flags are cached for reference.
     """
     keypoints, source = _pose_source_keypoints(image_filename)
+    stage, flags, _src = get_class_and_flags_with_source(image_filename)
+    flags = [f for f in FLAGS if f in set(flags or [])]
+    return keypoints, source, stage, flags
+
+
+def _row_metric_version(prev_row, file_versions, metric: str) -> int:
+    """Version the cached ``metric`` value in ``prev_row`` was computed at.
+
+    A per-image ``metric_versions`` override wins (stamped when the normalized
+    view refreshes a single row); otherwise the file-level ``metric_versions``;
+    a cache with neither is assumed to hold the legacy (v1) values (see
+    :data:`moths.utils.metrics.LEGACY_METRIC_VERSIONS`) so a later bump still
+    forces a recompute.
+    """
+    if isinstance(prev_row, dict):
+        override = prev_row.get("metric_versions")
+        if isinstance(override, dict) and metric in override:
+            return override[metric]
+    if isinstance(file_versions, dict) and metric in file_versions:
+        return file_versions[metric]
+    # No recorded version: a pre-scheme cache, assumed to hold the legacy (v1)
+    # values so a later bump still forces this metric's recompute.
+    return LEGACY_METRIC_VERSIONS.get(metric, METRIC_VERSIONS[metric])
+
+
+def pose_row_needs_rebuild(row, file_versions) -> bool:
+    """True when a cached ``row``'s metrics are stale (a rebuild would help).
+
+    Stale when the row is explicitly flagged (``needs_rebuild``, set after a
+    manual keypoint edit) or any metric's effective version (per-image override,
+    else file-level ``file_versions``, else the legacy baseline) differs from
+    the current one. Used by the poses view to show a per-plate "rebuild" note.
+    """
+    if not isinstance(row, dict):
+        return False
+    if row.get("needs_rebuild"):
+        return True
+    return any(
+        _row_metric_version(row, file_versions, metric) != current
+        for metric, current in METRIC_VERSIONS.items()
+    )
+
+
+def _build_pose_row(image_filename, prev_row, file_versions, *, allow_heavy):
+    """Compute one pose row, reusing still-valid cached metric values.
+
+    A metric is recomputed only when the pose inputs (keypoints/source) changed
+    or its recorded version differs from the current one. The heavy sharpness
+    metric is additionally never recomputed unless ``allow_heavy`` (the explicit
+    rebuild path): off that path a stale sharpness keeps its old value but is
+    stamped with a sentinel version so the next rebuild refreshes it. Also
+    records ``stage``/``flags`` and the intrinsic ``width``/``height``. Returns
+    ``(row, obj_versions)`` where ``obj_versions`` is the per-metric version the
+    row actually holds.
+    """
+    keypoints, source, stage, flags = _pose_inputs(image_filename)
     pose = classify_pose(image_filename)
-    size = get_image_size(image_filename)
-    width, height = size if size else (None, None)
-    symmetry = pose_symmetry_metric(image_filename)
-    pixel_span = pose_pixel_span(image_filename)
-    # Sharpness only needs a bounding box now, so it is available for any
-    # annotated image (not just top-down).
-    sharpness = compute_sharpness(image_filename)
-    return {
+    inputs_changed = (
+        not isinstance(prev_row, dict)
+        or prev_row.get("keypoints") != keypoints
+        or prev_row.get("source") != source
+    )
+
+    if (
+        isinstance(prev_row, dict)
+        and not inputs_changed
+        and prev_row.get("width") is not None
+    ):
+        width, height = prev_row.get("width"), prev_row.get("height")
+    else:
+        size = get_image_size(image_filename)
+        width, height = size if size else (None, None)
+
+    obj_versions: dict[str, int] = {}
+
+    def resolve(metric, compute, *, heavy=False):
+        recorded = _row_metric_version(prev_row, file_versions, metric)
+        stale = inputs_changed or recorded != METRIC_VERSIONS[metric]
+        if not stale:
+            obj_versions[metric] = recorded
+            return prev_row.get(metric) if isinstance(prev_row, dict) else None
+        if allow_heavy or not heavy:
+            obj_versions[metric] = METRIC_VERSIONS[metric]
+            return compute()
+        # Stale heavy metric we may not recompute here: keep the old value but
+        # record a sentinel so the next explicit rebuild recomputes it.
+        obj_versions[metric] = _STALE_METRIC_VERSION
+        return prev_row.get(metric) if isinstance(prev_row, dict) else None
+
+    symmetry = resolve("symmetry", lambda: pose_symmetry_metric(image_filename))
+    pixel_span = resolve("pixel_span", lambda: pose_pixel_span(image_filename))
+    sharpness = resolve(
+        "sharpness", lambda: compute_sharpness(image_filename), heavy=True
+    )
+
+    row = {
         "pose": pose,
         "source": source,
         "keypoints": keypoints,
+        "stage": stage,
+        "flags": flags,
         "width": width,
         "height": height,
         "symmetry": symmetry,
         "pixel_span": pixel_span,
         "sharpness": sharpness,
         "score": cumulative_score(symmetry, pixel_span, sharpness),
-        "flags": get_image_flags(image_filename),
     }
+    return row, obj_versions
+
+
+def compute_pose_row(image_filename: str) -> dict:
+    """Compute a fresh pose row with every metric recomputed at the current
+    version (the slow path). Records ``source``/``keypoints``/``stage``/
+    ``flags`` and the intrinsic ``width``/``height`` alongside the metrics.
+    """
+    row, _versions = _build_pose_row(image_filename, None, None, allow_heavy=True)
+    return row
 
 
 def get_pose_data_path(tax_id: str) -> Path:
@@ -241,14 +352,23 @@ def build_pose_data(tax_id: str, images) -> dict:
     """
     prev = load_pose_data_raw(tax_id)
     prev_images = prev.get("images", {}) if prev else {}
+    prev_file_versions = prev.get("metric_versions") if prev else None
 
     per_image = {}
     for image in images:
         filename = image.filename
-        keypoints, source = _pose_source_keypoints(filename)
         prev_row = prev_images.get(filename)
-        if prev_row is not None and prev_row.get("keypoints") == keypoints \
-                and prev_row.get("source") == source:
+        # Explicit rebuild path: allow_heavy so any stale metric (incl.
+        # sharpness) is recomputed, but a metric whose version and keypoints are
+        # unchanged is reused untouched. After this pass every row is at the
+        # current versions, so no per-row override is kept (file-level records
+        # them).
+        row, _versions = _build_pose_row(
+            filename, prev_row, prev_file_versions, allow_heavy=True
+        )
+        if prev_row is not None \
+                and prev_row.get("keypoints") == row["keypoints"] \
+                and prev_row.get("source") == row["source"]:
             # Keypoints unchanged since the last cache (even across a version
             # bump): reuse the existing crop/thumbnail instead of regenerating.
             touch_normalized(filename)
@@ -256,9 +376,13 @@ def build_pose_data(tax_id: str, images) -> dict:
             # Keypoints changed: force the crop/thumbnail to be rebuilt.
             clear_normalized(filename)
         # No prior row: leave get_or_create_normalized's mtime cache to decide.
-        per_image[filename] = compute_pose_row(filename)
+        per_image[filename] = row
 
-    data = {"version": POSE_DATA_VERSION, "images": per_image}
+    data = {
+        "version": POSE_DATA_VERSION,
+        "metric_versions": dict(METRIC_VERSIONS),
+        "images": per_image,
+    }
     _write_pose_data(tax_id, data)
     refresh_tax_thumbnail(tax_id, per_image)
     build_wing_stats(tax_id, per_image)
@@ -280,43 +404,61 @@ def get_pose_data(tax_id: str, images, rebuild: bool = False) -> dict:
 
 
 def verify_pose_row(tax_id: str, image_filename: str) -> dict | None:
-    """Ensure the cached pose row reflects the image's current keypoints.
+    """Light-refresh one image's cached pose row for the normalized view.
 
-    Compares the stored ``source``/``keypoints`` against the live pose source
-    (``MOTHS_LABEL_DIR`` then ``MOTHS_PREDICTION_DIR``); when they differ, the
-    row and the normalized crop are recomputed and the caches (pose data +
-    thumbnail) updated. This is the only place recomputation is triggered on
-    change — the poses view reads the cache as-is. Returns the current row.
+    Recomputes only the *cheap* metrics (symmetry, pixel span) when the image's
+    keypoints changed or a metric's version is stale, and refreshes the
+    normalized crop; the heavy **sharpness** metric is never recomputed here
+    (only the explicit rebuild does) — a stale sharpness keeps its old value and
+    is stamped with a per-row sentinel version so a later rebuild refreshes it.
+    The refreshed row's per-metric versions are documented in a per-image
+    ``metric_versions`` override when they differ from the file-level baseline.
+    Returns the current row. This is the only place recomputation is triggered
+    outside an explicit rebuild — the poses view reads the cache as-is.
     """
-    data = load_pose_data(tax_id)
+    data = load_pose_data_raw(tax_id)
     if data is None:
-        # No/stale cache: build the whole tax once so the file stays consistent.
-        data = build_pose_data(tax_id, scan_tax_images(tax_id))
+        # No cache at all: compute *only* this image for display. Rebuilding the
+        # whole tax here would recompute (and normalize) every image of the
+        # species as a side effect of opening one — surprising and slow. The
+        # explicit Rebuild button (or tools/rebuild_poses.py) builds the full
+        # cache, so we don't persist into a missing file.
+        return compute_pose_row(image_filename)
 
     images = data.get("images", {})
-    row = images.get(image_filename)
+    prev_row = images.get(image_filename)
+    file_versions = data.get("metric_versions")
 
-    keypoints, source = _pose_source_keypoints(image_filename)
-    if (
-        row is not None
-        and row.get("source") == source
-        and row.get("keypoints") == keypoints
+    # Refresh the cheap metrics only (allow_heavy=False keeps sharpness cached).
+    row, obj_versions = _build_pose_row(
+        image_filename, prev_row, file_versions, allow_heavy=False
+    )
+
+    # Stamp a per-image override only when this row's actual metric versions
+    # differ from the file-level baseline (so e.g. a lagging sharpness is
+    # documented per object without touching the other rows).
+    baseline = file_versions if isinstance(file_versions, dict) else METRIC_VERSIONS
+    if any(
+        obj_versions.get(m) != baseline.get(m, METRIC_VERSIONS[m])
+        for m in METRIC_VERSIONS
     ):
-        # Keypoints are actually unchanged; drop any stale flag (e.g. from a
-        # re-save with identical points) without recomputing.
-        if row.pop("needs_rebuild", None):
-            data["images"] = images
-            _write_pose_data(tax_id, data)
-        return row
+        row["metric_versions"] = obj_versions
 
-    # Keypoints changed (or row missing): recompute just this image. This also
-    # clears any pending ``needs_rebuild`` flag since the row is now current.
-    clear_normalized(image_filename)
-    row = compute_pose_row(image_filename)
-    images[image_filename] = row
-    data["images"] = images
-    _write_pose_data(tax_id, data)
-    refresh_tax_thumbnail(tax_id, images)
+    keypoints_changed = not (
+        isinstance(prev_row, dict)
+        and prev_row.get("keypoints") == row["keypoints"]
+        and prev_row.get("source") == row["source"]
+    )
+    # Rewrite only when something actually changed (values, versions, or a
+    # lingering needs_rebuild flag to clear); avoids needless disk churn.
+    had_flag = bool(isinstance(prev_row, dict) and prev_row.get("needs_rebuild"))
+    if row != prev_row or had_flag:
+        if keypoints_changed:
+            clear_normalized(image_filename)
+        images[image_filename] = row
+        data["images"] = images
+        _write_pose_data(tax_id, data)
+        refresh_tax_thumbnail(tax_id, images)
     return row
 
 
@@ -360,3 +502,7 @@ def set_pose_row_flags(tax_id: str, image_filename: str, flags: list[str]) -> No
     images[image_filename] = row
     data["images"] = images
     _write_pose_data(tax_id, data)
+    # Flags can switch the normalization layout (e.g. a suppress-normalization
+    # flag falls back to the bbox crop), so drop the cached crop to force a
+    # rebuild on the next view.
+    clear_normalized(image_filename)
