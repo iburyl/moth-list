@@ -20,7 +20,9 @@ services:
     environment:
       DJANGO_DEBUG: "False"
       DJANGO_BEHIND_PROXY: "1"
-      DJANGO_ALLOWED_HOSTS: "${SITE_DOMAIN}"
+      # Loopback is needed by the container HEALTHCHECK, which probes the login
+      # page over 127.0.0.1 and would otherwise get a DisallowedHost 400.
+      DJANGO_ALLOWED_HOSTS: "${SITE_DOMAIN},127.0.0.1,localhost"
       DJANGO_CSRF_TRUSTED_ORIGINS: "https://${SITE_DOMAIN}"
       # Container-internal dataset paths; their host locations are the *_HOST
       # variables in .env, mapped by the volume mounts below.
