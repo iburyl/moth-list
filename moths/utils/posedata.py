@@ -14,12 +14,13 @@ from .classes import (
     load_starred,
 )
 from .annotations import (
-    POSE_TOP_DOWN,
+    POSE_NONE,
     _pose_source_keypoints,
     classify_pose,
     get_class_and_flags_with_source,
     get_label_dir,
 )
+from .groups import target_group_ids, unified_group_order
 from .metrics import (
     LEGACY_METRIC_VERSIONS,
     METRIC_VERSIONS,
@@ -56,28 +57,58 @@ def get_tax_thumbnail(tax_id: str) -> str | None:
 def choose_tax_thumbnail(tax_id: str, per_image: dict | None = None) -> dict | None:
     """Pick ``tax_id``'s representative thumbnail from pose data (no I/O writes).
 
-    Mirrors the poses view's default order: among top-down images with a score,
-    starred ones win, then the highest cumulative score. Returns a
-    ``{"filename", "score", "starred"}`` dict, or ``None`` when there are no
-    scored top-down images yet. Pure w.r.t. the summary cache, so it can be used
-    both by :func:`build_summary` and :func:`refresh_tax_thumbnail` without
-    recursion.
+    Follows the poses page's group order (:func:`unified_group_order`):
+
+    A. Among **starred** images, walk the groups top to bottom; the first group
+       that holds a scored image wins, and within it the highest-scoring image.
+    B. If no starred image has a score, repeat the same walk over the
+       **non-starred** images.
+
+    So a starred image always beats any non-starred one, and otherwise the
+    earliest group (top-down before side, etc.) decides — matching what you see
+    first on the species page. Stage/flags are read live (as the page does) so
+    the choice tracks the current grouping; pose and score come from the cached
+    row. Returns ``{"filename", "score", "starred"}`` or ``None`` when no image
+    has a score yet. Pure w.r.t. the summary cache, so it is safe to call from
+    both :func:`build_summary` and :func:`refresh_tax_thumbnail`.
     """
     if per_image is None:
         data = load_pose_data(tax_id)
         per_image = data.get("images", {}) if data else {}
 
     starred = load_starred(tax_id)
-    candidates = [
-        (image_basename(filename) in starred, row.get("score"), filename)
-        for filename, row in per_image.items()
-        if row.get("pose") == POSE_TOP_DOWN and row.get("score") is not None
-    ]
-    if not candidates:
+    order = unified_group_order()
+
+    # Best (highest score) scored image per group, split by starred vs not.
+    best_starred: dict[str, tuple[float, str]] = {}
+    best_other: dict[str, tuple[float, str]] = {}
+    for filename, row in per_image.items():
+        score = row.get("score")
+        if score is None:
+            continue
+        stage, raw_flags, _src = get_class_and_flags_with_source(filename)
+        flags = [f for f in FLAGS if f in set(raw_flags or [])]
+        pose = row.get("pose", POSE_NONE)
+        target = best_starred if image_basename(filename) in starred else best_other
+        for gid in target_group_ids(stage, flags, pose):
+            cur = target.get(gid)
+            if cur is None or score > cur[0]:
+                target[gid] = (score, filename)
+
+    def _first_in_order(best: dict[str, tuple[float, str]]):
+        for gid in order:
+            if gid in best:
+                return best[gid]  # (score, filename)
         return None
 
-    is_starred, best_score, best_file = max(candidates, key=lambda t: (t[0], t[1]))
-    return {"filename": best_file, "score": best_score, "starred": is_starred}
+    winner = _first_in_order(best_starred)
+    is_starred = winner is not None
+    if winner is None:
+        winner = _first_in_order(best_other)
+    if winner is None:
+        return None
+    score, filename = winner
+    return {"filename": filename, "score": score, "starred": is_starred}
 
 
 def refresh_tax_thumbnail(tax_id: str, per_image: dict | None = None) -> str | None:

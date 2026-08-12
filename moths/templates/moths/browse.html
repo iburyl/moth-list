@@ -1,7 +1,7 @@
 {% extends "moths/base.html" %}
 {% load moth_names %}
 
-{% block title %}Browse taxonomy — Moths List{% endblock %}
+{% block title %}Browse taxonomy — Moth List{% endblock %}
 
 {% block content %}
 <style>
@@ -64,7 +64,7 @@
         <b>{{ node_counts.species_have_image }}</b> with images,
         {{ node_counts.species_have_zero }} with a summary but no images.
         {% if not child_is_species %}
-            {{ node_counts.want }} {{ child_level }} ({{ node_counts.have_any }} with data,
+            {{ node_counts.want }} {{ child_level_plural }} ({{ node_counts.have_any }} with data,
             {{ node_counts.have_all }} complete).
         {% endif %}
     </p>
@@ -76,18 +76,22 @@
             <thead>
                 <tr>
                     <th class="thumb" rowspan="2"></th>
-                    <th class="name" rowspan="2">{{ child_level }} ({{ children|length }})</th>
+                    <th class="name" rowspan="2">{{ child_level_plural }} ({{ children|length }})</th>
                     {% if next_level != "species" %}
-                        <th rowspan="2" class="col-group" title="Number of {{ next_level }} entities in this group">{{ next_level }}</th>
+                        <th rowspan="2" class="col-group" title="Number of {{ next_level_plural }} in this group">{{ next_level_plural }}</th>
                     {% endif %}
                     <th rowspan="2"{% if next_level == "species" %} class="col-group"{% endif %} title="Species with an image folder on disk, of species expected">species</th>
                     <th rowspan="2" class="col-group" title="Total images under this category">images</th>
+                    {% if can_edit %}
                     <th class="group col-group" colspan="2" title="Hand-label gaps still to review">to review</th>
+                    {% endif %}
                     <th rowspan="2" class="col-group" title="Total iNaturalist observations (from the names CSV)">obs</th>
                 </tr>
                 <tr>
+                    {% if can_edit %}
                     <th class="col-group" title="Images with no hand stage label">stage</th>
                     <th title="Images with no hand box label">box</th>
+                    {% endif %}
                 </tr>
             </thead>
             <tbody>
@@ -106,8 +110,10 @@
                         {% endif %}
                         <td{% if next_level == "species" %} class="col-group"{% endif %}>{% if row.species_have_folder == row.species_want %}{{ row.species_have_folder }}{% else %}{{ row.species_have_folder }} of {{ row.species_want }}{% endif %}</td>
                         <td class="col-group">{% if row.images %}{{ row.images }}{% else %}<span class="num-zero">0</span>{% endif %}</td>
+                        {% if can_edit %}
                         <td class="col-group">{% if row.no_stage %}{{ row.no_stage }}{% else %}<span class="num-zero">0</span>{% endif %}</td>
                         <td>{% if row.no_box %}{{ row.no_box }}{% else %}<span class="num-zero">0</span>{% endif %}</td>
+                        {% endif %}
                         <td class="col-group">{% if row.obs %}{{ row.obs }}{% else %}<span class="num-zero">—</span>{% endif %}</td>
                     </tr>
                 {% endfor %}

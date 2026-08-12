@@ -1,0 +1,15 @@
+# Caddy reverse proxy for the moths_list web server.
+#
+# Caddy automatically obtains and renews a Let's Encrypt TLS certificate for
+# SITE_DOMAIN and proxies HTTPS traffic to gunicorn (the `web` service on the
+# compose network). SITE_DOMAIN / ACME_EMAIL are injected from the environment
+# (see docker-compose.yml, sourced from .env).
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$SITE_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy web:8000
+}

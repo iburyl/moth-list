@@ -77,8 +77,8 @@
     <div class="detail-layout">
         <div class="viewer-col">
             <div class="view-tabs">
-                <a class="view-tab" href="{% url 'moths:image_edit' image.filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}">Edit</a>
                 <span class="view-tab active">Normalized</span>
+                <a class="view-tab" href="{% url 'moths:image_original' image.filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}">Original</a>
             </div>
             <div class="viewer" id="viewer">
                 <div class="toolbar">
@@ -107,6 +107,7 @@
                 <li><span>quality</span><span class="{% if is_research %}research-ok{% endif %}">{% if is_research %}&#10004; {% endif %}{{ quality_grade|default:"—" }}</span></li>
             </ul>
 
+            {% if can_edit %}
             <h3>Observation</h3>
             <div class="subsection">
                 <button type="button" id="star-btn"
@@ -122,7 +123,9 @@
                     {% if starred %}Shown first in the poses view.{% else %}Not starred.{% endif %}
                 </p>
             </div>
+            {% endif %}
 
+            {% if can_edit %}
             <h3>Details rating</h3>
             <div class="subsection" id="rating"
                  data-url="{% url 'moths:set_details' image.filename %}"
@@ -138,6 +141,7 @@
                     Keys 1&ndash;5 rate; 0 or click the active one clears. Ground truth only.
                 </p>
             </div>
+            {% endif %}
 
             {% if metrics %}
             <h3>Metrics</h3>
@@ -241,7 +245,10 @@
             document.addEventListener("viewer:load", renderOverlay);
             if (window.Viewer && window.Viewer.ready) renderOverlay();
         })();
+    </script>
 
+    {% if can_edit %}
+    <script>
         // --- Star / unstar the observation -------------------------------
         (function () {
             var btn = document.getElementById("star-btn");
@@ -355,4 +362,5 @@
             });
         })();
     </script>
+    {% endif %}
 {% endblock %}

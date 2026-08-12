@@ -1,7 +1,7 @@
 {% extends "moths/base.html" %}
 {% load moth_names %}
 
-{% block title %}{% tax_species tax_id %} — Moths List{% endblock %}
+{% block title %}{% tax_species tax_id %} — Moth List{% endblock %}
 
 {% block content %}
     <h2 class="tax-heading">{% tax_breadcrumb tax_id %}</h2>
@@ -63,6 +63,13 @@
         }
         .select-delete-btn:hover { background: #dc2626; border-color: #dc2626; }
         .select-delete-btn:disabled { opacity: 0.6; cursor: default; }
+        /* Confirm-prediction (adopt predicted stage/flags) — blue, like the
+           "from prediction" accents elsewhere. */
+        .select-confirm-btn {
+            padding: 0.35rem 0.7rem; border: 1px solid #8883; border-radius: 6px;
+            background: #2563eb; color: #fff; cursor: pointer; font-size: 0.85rem;
+        }
+        .select-confirm-btn:disabled { opacity: 0.6; cursor: default; }
         .image-grid.selectable a { cursor: pointer; }
         /* Outer ring + glow so the selection sits around the plate, never over
            the image (an inset outline looked uneven against the photo). */
@@ -113,7 +120,7 @@
         <section class="pose-group">
             <h3>
                 {{ group.label }} <span class="count">{{ group.rows|length }}</span>
-                <button type="button" class="select-all-btn">select all</button>
+                {% if can_edit %}<button type="button" class="select-all-btn">select all</button>{% endif %}
             </h3>
 
             <ul class="image-grid">
@@ -128,7 +135,7 @@
                             {% if row.is_norm %}
                                 <a href="{% url 'moths:image_normalized' row.image.filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}">
                             {% else %}
-                                <a href="{% url 'moths:image_edit' row.image.filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}">
+                                <a href="{% url 'moths:image_original' row.image.filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}">
                             {% endif %}
                                 {% if row.starred %}<span class="star-overlay" title="Starred">&#9733;</span>{% endif %}
                                 {% if row.is_norm %}
@@ -165,11 +172,12 @@
             <li><span>iNaturalist</span><span><a href="https://www.inaturalist.org/taxa/{{ tax_id }}" target="_blank" rel="noopener">view taxon &#8599;</a></span></li>
         </ul>
 
-        {% if has_images %}
+        {% if has_images and can_edit %}
         <h3>Selection</h3>
         <div class="subsection" id="select-panel"
              data-url="{% url 'moths:set_selection_stage' tax_id %}"
              data-delete-url="{% url 'moths:delete_selection' tax_id %}"
+             data-confirm-url="{% url 'moths:confirm_selection_prediction' tax_id %}"
              data-csrf="{{ csrf_token }}">
             <button type="button" id="select-toggle" class="rebuild-btn select-toggle"
                     title="Click images to select them instead of opening them">
@@ -184,6 +192,10 @@
                     <button type="button" class="select-stage-btn" data-stage="Larva">Larva</button>
                     <button type="button" class="select-stage-btn" data-stage="Pupa">Pupa</button>
                     <button type="button" class="select-stage-btn" data-stage="Adult">Adult</button>
+                </div>
+                <p class="muted" style="margin:0.5rem 0 0;">or confirm the model prediction (adopts predicted stage + flags):</p>
+                <div class="select-stage-buttons">
+                    <button type="button" class="select-confirm-btn" id="select-confirm">Confirm prediction</button>
                 </div>
                 <p class="muted" style="margin:0.5rem 0 0;">or delete (starred images are skipped):</p>
                 <div class="select-stage-buttons">
@@ -219,7 +231,7 @@
         </div>
         {% endif %}
 
-        {% if has_images %}
+        {% if has_images and can_edit %}
         <h3>Advanced actions</h3>
         <div class="subsection">
             <form method="post"
@@ -236,6 +248,7 @@
     </aside>
     </div>
 
+    {% if can_edit %}
     <script>
         (function () {
             // --- Selection mode -------------------------------------------------
@@ -399,7 +412,57 @@
                             });
                     });
                 }
+
+                // Confirm prediction: adopt each selected image's predicted
+                // stage + flags as its hand label. Reloads on success.
+                var confirmBtn = document.getElementById("select-confirm");
+                if (confirmBtn) {
+                    confirmBtn.addEventListener("click", function () {
+                        var names = selectedItems().map(function (li) {
+                            return li.dataset.name;
+                        });
+                        if (names.length === 0) {
+                            statusEl.textContent = "Nothing selected.";
+                            return;
+                        }
+                        if (!window.confirm(
+                            "Confirm the model prediction (stage + flags) for " +
+                            names.length + " image(s)? This overwrites their hand " +
+                            "stage/flags."
+                        )) return;
+                        stageButtons.forEach(function (b) { b.disabled = true; });
+                        confirmBtn.disabled = true;
+                        statusEl.textContent = "Confirming\u2026";
+                        fetch(panel.dataset.confirmUrl, {
+                            method: "POST",
+                            headers: {
+                                "X-CSRFToken": panel.dataset.csrf,
+                                "Content-Type": "application/json",
+                            },
+                            body: JSON.stringify({ filenames: names }),
+                        })
+                            .then(function (r) { return r.json(); })
+                            .then(function (data) {
+                                if (data.ok) {
+                                    statusEl.textContent =
+                                        "Confirmed " + data.count + ". Reloading\u2026";
+                                    window.location.reload();
+                                } else {
+                                    statusEl.textContent =
+                                        "Error: " + (data.error || "failed");
+                                    stageButtons.forEach(function (b) { b.disabled = false; });
+                                    confirmBtn.disabled = false;
+                                }
+                            })
+                            .catch(function () {
+                                statusEl.textContent = "Failed.";
+                                stageButtons.forEach(function (b) { b.disabled = false; });
+                                confirmBtn.disabled = false;
+                            });
+                    });
+                }
             }
         })();
     </script>
+    {% endif %}
 {% endblock %}

@@ -46,7 +46,9 @@ browse page.
             <th class="tax-col" rowspan="2">species</th>
             <th class="group-head col-group" colspan="{{ stages|length }}">stages</th>
             <th class="group-head col-group" colspan="4">view</th>
+            {% if can_edit %}
             <th class="group-head col-group" colspan="2" title="Hand-label gaps still to review">to review</th>
+            {% endif %}
             <th class="col-group" rowspan="2" title="iNaturalist observation count (from the names CSV)">obs</th>
         </tr>
         <tr>
@@ -57,8 +59,10 @@ browse page.
             <th>side</th>
             <th>bottom-up</th>
             <th>unclear</th>
+            {% if can_edit %}
             <th class="col-group" title="Images with no hand stage label">stage</th>
             <th title="Images with no hand box label">box</th>
+            {% endif %}
         </tr>
     </thead>
     <tbody>
@@ -83,8 +87,10 @@ browse page.
                 {% for cell in row.view_cells %}
                     <td class="num{% if forloop.first %} col-group{% endif %}">{% include "moths/_count_cell.html" with count=cell.count tax_id=row.tax_id qkey="pose" qval=cell.pose %}</td>
                 {% endfor %}
+                {% if can_edit %}
                 <td class="num col-group">{% include "moths/_count_cell.html" with count=row.no_stage tax_id=row.tax_id qkey="stage" qval="none" %}</td>
                 <td class="num">{% include "moths/_count_cell.html" with count=row.no_box tax_id=row.tax_id qkey="labeled" qval="no" %}</td>
+                {% endif %}
                 <td class="num col-group">{% if row.obs %}{{ row.obs }}{% else %}<span class="zero">—</span>{% endif %}</td>
             </tr>
         {% endfor %}

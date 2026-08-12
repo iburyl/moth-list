@@ -1,0 +1,8 @@
+# Python dependencies for running the Django web server (the Docker image).
+# This is ONLY the web app: the base app deps plus a production WSGI server and
+# static-file serving. The tools/ prediction pipeline (torch, ultralytics,
+# requests, ...) is deliberately NOT included here.
+-r requirements.txt
+
+gunicorn>=22.0,<23.0
+whitenoise>=6.6,<7.0

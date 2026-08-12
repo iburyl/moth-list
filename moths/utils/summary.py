@@ -193,9 +193,11 @@ def _write_summary(tax_id: str, data: dict) -> None:
 def build_summary(tax_id: str, images=None, update_tree: bool = True) -> dict:
     """Compute and cache the index summary (names + counts) for a tax_id.
 
-    Reuses the previously stored representative-thumbnail choice when present;
-    otherwise (e.g. after a schema bump wipes the old summary) it re-derives it
-    from the cached pose data, so a rebuild doesn't drop the thumbnail.
+    Re-derives the representative thumbnail from the current pose data on every
+    build, so an edit to any image's stage/flags/box/keypoints (which routes
+    through here via ``update_summary``) re-picks the winner. Only when the pose
+    data can't yield a candidate does it keep the previously stored choice, so a
+    schema bump that momentarily wipes the summary doesn't drop the thumbnail.
 
     When ``update_tree`` is set (the default, used by the web app) the change is
     folded into the hierarchical ``labels/tax_summary.json`` via a cheap soft
@@ -206,7 +208,7 @@ def build_summary(tax_id: str, images=None, update_tree: bool = True) -> dict:
         images = scan_tax_images(tax_id)
     info = get_name_info(tax_id)
     existing = load_summary(tax_id)
-    thumbnail = (existing or {}).get("thumbnail") or choose_tax_thumbnail(tax_id)
+    thumbnail = choose_tax_thumbnail(tax_id) or (existing or {}).get("thumbnail")
     data = {
         "version": SUMMARY_VERSION,
         "names": {

@@ -9,14 +9,13 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views.decorators.http import require_POST
 
+from .permissions import editor_required
 from .utils import (
     _NO_SUBFAMILY,
     _UNKNOWN_TAXON,
     FLAG_TABLE,
     KEYPOINT_LABELS,
     POSE_BOTTOM_UP,
-    flag_applies_to_stage,
-    flags_for_stage,
     flags_suppress_normalization,
     POSE_NONE,
     POSE_SIDE,
@@ -78,102 +77,12 @@ from .utils import (
     verify_pose_row,
 )
 
-# Unified stage/pose/flag groups. A flagged image lands in a flag subsection per
-# flag it carries (so it can appear in more than one and is removed from its
-# pose/stage subsection); unflagged images fall into their stage/pose subsection.
-# Adults are split by predicted pose; other stages have a single base group;
-# images without a stage class fall into "unknown".
-GROUP_ADULT_TOP_DOWN = "adult_top_down"
-GROUP_ADULT_SIDE = "adult_side"
-GROUP_ADULT_BOTTOM_UP = "adult_bottom_up"
-GROUP_ADULT_UNCLEAR = "adult_unclear"
-GROUP_ADULT_NONE = "adult_none"
-GROUP_UNKNOWN = "unknown"
-
-# Adult pose -> unified group id (for UNFLAGGED adults only).
-ADULT_POSE_GROUP = {
-    POSE_TOP_DOWN: GROUP_ADULT_TOP_DOWN,
-    POSE_SIDE: GROUP_ADULT_SIDE,
-    POSE_BOTTOM_UP: GROUP_ADULT_BOTTOM_UP,
-    POSE_UNCLEAR: GROUP_ADULT_UNCLEAR,
-    POSE_NONE: GROUP_ADULT_NONE,
-}
-
-# Poses whose images carry keypoints: metrics, normalized-view link, score sort.
-KEYPOINT_POSES = {POSE_TOP_DOWN, POSE_SIDE, POSE_BOTTOM_UP, POSE_UNCLEAR}
-
-# Stage keys that get their own base/flag subsections (anything else -> unknown).
-STAGE_KEYS = ("Adult", "Pupa", "Larva", "Egg")
-
-
-def _flag_gid(stage_key, flag):
-    """Group id for a stage's flag subsection, e.g. ``adult_Pinned``."""
-    return f"{stage_key}_{flag}"
-
-
-# Adult base subsections, in display order: the "real" pose groups come first,
-# then (spliced by :func:`_unified_group_defs`) the Adult flag subsections, then
-# the degenerate pose groups.
-_ADULT_POSE_HEAD = [
-    (GROUP_ADULT_TOP_DOWN, "Adult: top-down view"),
-    (GROUP_ADULT_SIDE, "Adult: side view"),
-    (GROUP_ADULT_BOTTOM_UP, "Adult: bottom-up view"),
-]
-_ADULT_POSE_TAIL = [
-    (GROUP_ADULT_UNCLEAR, "Adult: unclear pose"),
-    (GROUP_ADULT_NONE, "Adult: no keypoints"),
-]
-# Display noun per stage bucket (Adult is handled separately by pose).
-_STAGE_PLURAL = {"Pupa": "Pupa", "Larva": "Larvae", "Egg": "Egg"}
-
-
-def _flag_subsection_defs(stage_key, plural):
-    """``(group_id, label, False)`` for each flag offered for ``stage_key``.
-
-    Driven entirely by the flag table (:func:`flags_for_stage`), so which flag
-    subsections a stage gets — and their order — follows the table, with no flag
-    name hardcoded here.
-    """
-    return [
-        (_flag_gid(stage_key, flag), f"{plural}: {flag.lower()}", False)
-        for flag in flags_for_stage(stage_key)
-    ]
-
-
-def _unified_group_defs():
-    """Ordered ``(group_id, label, is_unknown_base)`` specs for all subsections.
-
-    For adults the flag subsections sit between the real pose groups (top-down/
-    side/bottom-up) and the degenerate ones (unclear/no-keypoints); other stages
-    get their flag subsections right after the base group. Each stage only gets
-    the flag subsections the table says apply to it. ``is_unknown_base`` marks
-    the single unflagged "Unknown stage" group (the only one with bulk buttons).
-    """
-    defs = [(gid, label, False) for gid, label in _ADULT_POSE_HEAD]
-    defs += _flag_subsection_defs("Adult", "Adult")
-    defs += [(gid, label, False) for gid, label in _ADULT_POSE_TAIL]
-    for stage_key, plural in _STAGE_PLURAL.items():
-        defs.append((stage_key, plural, False))
-        defs += _flag_subsection_defs(stage_key, plural)
-    defs.append((GROUP_UNKNOWN, "Unknown stage", True))
-    defs += _flag_subsection_defs(GROUP_UNKNOWN, "Unknown stage")
-    return defs
-
-
-def _target_group_ids(stage, flags, pose):
-    """Group id(s) an image belongs to: one per applicable flag, else its group.
-
-    Only flags the table says apply to the image's stage steer grouping; a flag
-    that doesn't apply (e.g. a leftover Traces on an Adult) is ignored here so
-    the image still lands in its stage/pose subsection rather than vanishing.
-    """
-    stage_key = stage if stage in STAGE_KEYS else "unknown"
-    applicable = [f for f in flags if flag_applies_to_stage(f, stage_key)]
-    if applicable:
-        return [_flag_gid(stage_key, flag) for flag in applicable]
-    if stage_key == "Adult":
-        return [ADULT_POSE_GROUP.get(pose, GROUP_ADULT_NONE)]
-    return [stage_key]
+# Unified stage/pose/flag group definitions now live in moths.utils.groups (a
+# single source of truth shared with the thumbnail chooser). Imported with the
+# historical private names so the rest of this module reads unchanged.
+from .utils.groups import KEYPOINT_POSES  # noqa: E402
+from .utils.groups import target_group_ids as _target_group_ids  # noqa: E402
+from .utils.groups import unified_group_defs as _unified_group_defs  # noqa: E402
 
 # Colors per keypoint visibility flag (0 unlabeled, 1 occluded, 2 visible).
 VISIBILITY_COLORS = {0: "#9ca3af", 1: "#f59e0b", 2: "#22c55e"}
@@ -276,6 +185,15 @@ def _legacy_index(request):
 # Taxonomy levels by descent depth: depth 0 lists superfamilies, ... depth 4
 # lists the species leaves under a genus. Also the label of the children shown.
 BROWSE_LEVELS = ["superfamily", "family", "subfamily", "genus", "species"]
+# Plurals for column headers / count phrasing (English plurals here are
+# irregular, so spell them out rather than naively appending "s").
+BROWSE_LEVELS_PLURAL = {
+    "superfamily": "superfamilies",
+    "family": "families",
+    "subfamily": "subfamilies",
+    "genus": "genera",
+    "species": "species",
+}
 
 
 def _browse_seg_to_key(seg: str, index: int) -> str:
@@ -434,10 +352,14 @@ def browse(request, lineage=""):
         "index_rows": index_rows,
         "stages": STAGES,
         "child_level": child_level,
+        "child_level_plural": BROWSE_LEVELS_PLURAL[child_level],
         "child_is_species": child_is_species,
         # Label for the next-next level (the grandchildren the "want/with data/
         # complete" columns summarise); species children have no deeper level.
         "next_level": None if child_is_species else BROWSE_LEVELS[depth + 1],
+        "next_level_plural": (
+            None if child_is_species else BROWSE_LEVELS_PLURAL[BROWSE_LEVELS[depth + 1]]
+        ),
         "node_counts": node_counts,
         "level_label": BROWSE_LEVELS[depth - 1] if depth else "",
     }
@@ -933,6 +855,7 @@ def pose_view(request, tax_id):
     return render(request, "moths/tax_poses.html", context)
 
 
+@editor_required
 @require_POST
 def rebuild_poses(request, tax_id):
     """Recompute and cache the pose data for a tax_id, then return to the view.
@@ -1005,8 +928,13 @@ def _ordered_nav(request, image):
     return position, len(filenames), prev_filename, next_filename
 
 
-def image_edit(request, filename):
-    """Editable single-image view: annotations and stage (full controls)."""
+def image_original(request, filename):
+    """Original single-image view: the raw photo with editing controls.
+
+    Editors get the full annotation/stage/flags controls; anonymous viewers see
+    just the photo. The "Normalized" tab is shown only when the current
+    annotation can produce a normalized crop (``norm_available``).
+    """
     image = find_image(filename)
     if image is None:
         raise Http404("Image not found")
@@ -1079,7 +1007,7 @@ def image_edit(request, filename):
         "starred": is_image_starred(filename),
         "filter_qs": request.GET.urlencode(),
     }
-    return render(request, "moths/image_edit.html", context)
+    return render(request, "moths/image_original.html", context)
 
 
 def image_normalized(request, filename):
@@ -1087,7 +1015,7 @@ def image_normalized(request, filename):
 
     Shows the pose-normalized crop (side / vertical F→B) for adults with F&B
     keypoints, or the simplified bounding-box crop otherwise. Redirects to the
-    edit view only when the image has no annotation/box at all (no crop to
+    original view only when the image has no annotation/box at all (no crop to
     show), so the back/tabs never dead-end.
     """
     image = find_image(filename)
@@ -1113,7 +1041,7 @@ def image_normalized(request, filename):
 
     normalization = compute_normalization(filename)
     if normalization is None:
-        url = reverse("moths:image_edit", args=[filename])
+        url = reverse("moths:image_original", args=[filename])
         query = request.GET.urlencode()
         return redirect(f"{url}?{query}" if query else url)
 
@@ -1167,6 +1095,7 @@ def image_normalized(request, filename):
     return render(request, "moths/image_normalized.html", context)
 
 
+@editor_required
 @require_POST
 def set_selection_stage(request, tax_id):
     """Classify an explicit set of a tax_id's images as ``stage``.
@@ -1204,6 +1133,7 @@ def set_selection_stage(request, tax_id):
     return JsonResponse({"ok": True, "count": count, "stage": stage})
 
 
+@editor_required
 @require_POST
 def delete_selection(request, tax_id):
     """Physically delete an explicit set of a tax_id's images (skips starred).
@@ -1230,6 +1160,48 @@ def delete_selection(request, tax_id):
     return JsonResponse({"ok": True, **result})
 
 
+@editor_required
+@require_POST
+def confirm_selection_prediction(request, tax_id):
+    """Adopt the model prediction as the hand label for a set of images.
+
+    Body is JSON ``{"filenames": [...]}``. For each listed image of this tax_id
+    that has a predicted ``.class`` (stage and/or flags), those predicted values
+    are written as the hand stage/flags — i.e. the prediction is "confirmed".
+    Images without any prediction are skipped. Backs the poses view's selection
+    mode. Returns how many were confirmed.
+    """
+    try:
+        payload = json.loads(request.body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"error": "invalid JSON"}, status=400)
+
+    filenames = payload.get("filenames") or []
+    if not isinstance(filenames, list):
+        return JsonResponse({"error": "filenames must be a list"}, status=400)
+
+    count = 0
+    for filename in filenames:
+        if not isinstance(filename, str):
+            continue
+        if tax_id_for_file(filename) != tax_id or find_image(filename) is None:
+            continue
+        pred_stage, pred_flags = get_predicted_class_and_flags(filename)
+        if not pred_stage and not pred_flags:
+            continue  # nothing predicted to confirm
+        if pred_stage:
+            set_image_class(filename, pred_stage)
+        flags = set_image_flags(filename, pred_flags)
+        set_pose_row_flags(tax_id, filename, flags)
+        # Stage/flags can change the normalization layout, so drop the crop.
+        clear_normalized(filename)
+        count += 1
+    if count:
+        update_summary(tax_id)
+    return JsonResponse({"ok": True, "count": count})
+
+
+@editor_required
 @require_POST
 def save_label(request, filename):
     """Persist edited YOLO-pose annotations to the image's label file.
@@ -1254,7 +1226,11 @@ def save_label(request, filename):
     # Keypoints just changed: flag the cached pose row for rebuild (deferred;
     # the poses view shows "to be rebuild" until the next rebuild).
     mark_pose_row_stale(tax_id, filename)
-    return JsonResponse({"ok": True, "count": len(objects)})
+    return JsonResponse({
+        "ok": True,
+        "count": len(objects),
+        "normalized_available": compute_normalization(filename) is not None,
+    })
 
 
 def serve_image(request, filename):
@@ -1273,6 +1249,7 @@ def serve_image(request, filename):
     return FileResponse(open(file_path, "rb"))
 
 
+@editor_required
 @require_POST
 def set_stage(request, filename):
     """Store or clear the stage classification for an image.
@@ -1289,15 +1266,22 @@ def set_stage(request, filename):
         # Stage drives the normalization layout, so drop the cached crop.
         clear_normalized(filename)
         update_summary(tax_id_for_file(filename))
-        return JsonResponse({"stage": None})
+        return JsonResponse({
+            "stage": None,
+            "normalized_available": compute_normalization(filename) is not None,
+        })
     if stage not in STAGES:
         return JsonResponse({"error": "invalid stage"}, status=400)
     set_image_class(filename, stage)
     clear_normalized(filename)
     update_summary(tax_id_for_file(filename))
-    return JsonResponse({"stage": stage})
+    return JsonResponse({
+        "stage": stage,
+        "normalized_available": compute_normalization(filename) is not None,
+    })
 
 
+@editor_required
 @require_POST
 def set_flags(request, filename):
     """Store the optional flags (Pinned/Macro/Damaged) for an image.
@@ -1317,10 +1301,18 @@ def set_flags(request, filename):
     if not isinstance(requested, list):
         return JsonResponse({"error": "flags must be a list"}, status=400)
     flags = set_image_flags(filename, requested)
-    set_pose_row_flags(tax_id_for_file(filename), filename, flags)
-    return JsonResponse({"flags": flags})
+    tax_id = tax_id_for_file(filename)
+    set_pose_row_flags(tax_id, filename, flags)
+    # Flags move the image between poses-page groups, so the representative
+    # thumbnail may change (a now-flagged image can win/lose its group).
+    refresh_tax_thumbnail(tax_id)
+    return JsonResponse({
+        "flags": flags,
+        "normalized_available": compute_normalization(filename) is not None,
+    })
 
 
+@editor_required
 @require_POST
 def set_details(request, filename):
     """Store (1-5) or clear the throwaway hand ``details`` rating for an image.
@@ -1342,6 +1334,7 @@ def set_details(request, filename):
     return JsonResponse({"details": set_image_details(filename, rating)})
 
 
+@editor_required
 @require_POST
 def set_star(request, filename):
     """Star or unstar an observation (image). Returns the new state as JSON.

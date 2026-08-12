@@ -42,7 +42,12 @@ urlpatterns = [
         views.delete_selection,
         name="delete_selection",
     ),
-    path("image/<path:filename>/", views.image_edit, name="image_edit"),
+    path(
+        "tax/<str:tax_id>/confirm-selection-prediction",
+        views.confirm_selection_prediction,
+        name="confirm_selection_prediction",
+    ),
+    path("image/<path:filename>/original", views.image_original, name="image_original"),
     path(
         "image/<path:filename>/normalized",
         views.image_normalized,

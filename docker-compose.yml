@@ -1,0 +1,70 @@
+# Production deployment: the Django web server (gunicorn) behind Caddy, which
+# terminates HTTPS (automatic Let's Encrypt certs) and reverse-proxies to it.
+#
+# This stack is for the cloud only. Local development on Windows does NOT need
+# it: just set the MOTHS_* env vars and run `python manage.py runserver`
+# (DEBUG defaults to True). This file / .env are never read by runserver.
+#
+# Usage:
+#   1. cp .env.example .env  (and fill it in)
+#   2. docker compose up -d --build
+
+services:
+  web:
+    build: .
+    image: moths-web:latest
+    restart: unless-stopped
+    # Secrets / domain come from .env (DJANGO_SECRET_KEY, SITE_DOMAIN, host paths).
+    env_file:
+      - .env
+    environment:
+      DJANGO_DEBUG: "False"
+      DJANGO_BEHIND_PROXY: "1"
+      DJANGO_ALLOWED_HOSTS: "${SITE_DOMAIN}"
+      DJANGO_CSRF_TRUSTED_ORIGINS: "https://${SITE_DOMAIN}"
+      # Container-internal dataset paths; their host locations are the *_HOST
+      # variables in .env, mapped by the volume mounts below.
+      MOTHS_IMAGE_DIR: /srv/images
+      MOTHS_PREDICTION_DIR: /srv/prediction
+      MOTHS_LABEL_DIR: /srv/labels
+      MOTHS_THUMBNAIL_DIR: /srv/cache
+      TAX_CSV: /srv/names.csv
+      DJANGO_DB_PATH: /data/db.sqlite3
+    volumes:
+      # Read-only inputs.
+      - "${MOTHS_IMAGE_DIR_HOST}:/srv/images:ro"
+      - "${MOTHS_PREDICTION_DIR_HOST}:/srv/prediction:ro"
+      - "${MOTHS_NAMES_CSV_HOST}:/srv/names.csv:ro"
+      # Writable (pose data / summaries / .class / starred, and the crop cache).
+      - "${MOTHS_LABEL_DIR_HOST}:/srv/labels"
+      - "${MOTHS_THUMBNAIL_DIR_HOST}:/srv/cache"
+      # Persistent sqlite (auth/sessions/admin).
+      - moths_db:/data
+    expose:
+      - "8000"
+    # To hit gunicorn directly (bypassing Caddy) while debugging, uncomment:
+    # ports:
+    #   - "8000:8000"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      SITE_DOMAIN: "${SITE_DOMAIN}"
+      ACME_EMAIL: "${ACME_EMAIL}"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  moths_db:
+  caddy_data:
+  caddy_config:

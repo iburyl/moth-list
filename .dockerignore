@@ -1,0 +1,36 @@
+# The image only needs manage.py, moths_list/ and moths/. Everything below is
+# either explicitly not copied or must never leak into the web-server image.
+
+# The prediction/harvest pipeline and its heavy deps are out of scope here.
+tools/
+
+# VCS / editor / caches
+.git/
+.gitignore
+.vscode/
+.idea/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local virtualenvs
+.venv/
+venv/
+env/
+
+# Local dev DB and collected static (regenerated in the image)
+db.sqlite3
+staticfiles/
+
+# Dataset / generated artefacts (mounted as volumes at run time instead)
+images/
+labels/
+test/
+prediction/
+cache/
+data/
+*.zip
+
+# Docs and scratch
+*.md
+terminals/
