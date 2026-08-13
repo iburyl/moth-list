@@ -8,7 +8,7 @@
     {% if is_filtered %}
         <p class="muted">
             Filtered by <strong>{{ filter_desc }}</strong>
-            · <a href="{% url 'moths:pose_view' tax_id %}">show all</a>
+            · <a href="{% url 'moths:species_view' tax_id %}">show all</a>
             ({{ total }} of {{ total_all }})
         </p>
     {% endif %}
@@ -170,6 +170,48 @@
         <ul class="meta-list">
             <li><span>tax_id</span><span>{{ tax_id }}</span></li>
             <li><span>iNaturalist</span><span><a href="https://www.inaturalist.org/taxa/{{ tax_id }}" target="_blank" rel="noopener">view taxon &#8599;</a></span></li>
+        </ul>
+
+        <h3>From wiki</h3>
+        <ul class="meta-list">
+            <li>
+                <span>article</span>
+                <span>
+                    {% if wiki.article_url %}
+                        <a href="{{ wiki.article_url }}" target="_blank" rel="noopener" title="{{ wiki.scientific_name }}">link &#8599;</a>
+                    {% else %}
+                        —
+                    {% endif %}
+                </span>
+            </li>
+            <li>
+                <span>iucn</span>
+                <span>
+                    {% if wiki.has_iucn %}
+                        {% if wiki.iucn_url %}
+                            <a href="{{ wiki.iucn_url }}" target="_blank" rel="noopener">{{ wiki.iucn_status|default:"?" }} &#8599;</a>
+                        {% else %}
+                            {{ wiki.iucn_status|default:"?" }}
+                        {% endif %}
+                    {% else %}
+                        <span class="muted">—</span>
+                    {% endif %}
+                </span>
+            </li>
+            <li>
+                <span>tnc</span>
+                <span>
+                    {% if wiki.has_tnc %}
+                        {% if wiki.tnc_url %}
+                            <a href="{{ wiki.tnc_url }}" target="_blank" rel="noopener">{{ wiki.tnc_status|default:"?" }} &#8599;</a>
+                        {% else %}
+                            {{ wiki.tnc_status|default:"?" }}
+                        {% endif %}
+                    {% else %}
+                        <span class="muted">—</span>
+                    {% endif %}
+                </span>
+            </li>
         </ul>
 
         {% if has_images and can_edit %}

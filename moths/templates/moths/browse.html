@@ -46,7 +46,7 @@
     <p class="muted">
         The taxonomy summary (<code>labels/tax_summary.json</code>) has not been
         built yet. Run <code>tools/rebuild_poses.py</code> (or open a species'
-        poses view) to generate it.
+        species view) to generate it.
     </p>
 {% else %}
     <nav class="crumbs">
@@ -81,13 +81,18 @@
                         <th rowspan="2" class="col-group" title="Number of {{ next_level_plural }} in this group">{{ next_level_plural }}</th>
                     {% endif %}
                     <th rowspan="2"{% if next_level == "species" %} class="col-group"{% endif %} title="Species with an image folder on disk, of species expected">species</th>
+                    <th class="group col-group" colspan="1" title="Wikipedia Speciesbox coverage under this group">from wiki</th>
+                    <th class="group col-group" colspan="1" title="Butterflies of America coverage under this group">from boa</th>
+                    <th class="group col-group" colspan="1" title="iNaturalist data from the names CSV">from iNats</th>
                     <th rowspan="2" class="col-group" title="Total images under this category">images</th>
                     {% if can_edit %}
                     <th class="group col-group" colspan="2" title="Hand-label gaps still to review">to review</th>
                     {% endif %}
-                    <th rowspan="2" class="col-group" title="Total iNaturalist observations (from the names CSV)">obs</th>
                 </tr>
                 <tr>
+                    <th class="col-group" title="Species with a downloaded Wikipedia article">articles</th>
+                    <th class="col-group" title="Species with a Butterflies of America page">species</th>
+                    <th class="col-group" title="Total iNaturalist observations (from the names CSV)">obs</th>
                     {% if can_edit %}
                     <th class="col-group" title="Images with no hand stage label">stage</th>
                     <th title="Images with no hand box label">box</th>
@@ -109,12 +114,14 @@
                             <td class="col-group">{{ row.want }}</td>
                         {% endif %}
                         <td{% if next_level == "species" %} class="col-group"{% endif %}>{% if row.species_have_folder == row.species_want %}{{ row.species_have_folder }}{% else %}{{ row.species_have_folder }} of {{ row.species_want }}{% endif %}</td>
+                        <td class="col-group">{% if row.wiki.articles %}{{ row.wiki.articles }}{% else %}<span class="num-zero">0</span>{% endif %}</td>
+                        <td class="col-group">{% if row.boa.species %}{{ row.boa.species }}{% else %}<span class="num-zero">0</span>{% endif %}</td>
+                        <td class="col-group">{% if row.obs %}{{ row.obs }}{% else %}<span class="num-zero">—</span>{% endif %}</td>
                         <td class="col-group">{% if row.images %}{{ row.images }}{% else %}<span class="num-zero">0</span>{% endif %}</td>
                         {% if can_edit %}
                         <td class="col-group">{% if row.no_stage %}{{ row.no_stage }}{% else %}<span class="num-zero">0</span>{% endif %}</td>
                         <td>{% if row.no_box %}{{ row.no_box }}{% else %}<span class="num-zero">0</span>{% endif %}</td>
                         {% endif %}
-                        <td class="col-group">{% if row.obs %}{{ row.obs }}{% else %}<span class="num-zero">—</span>{% endif %}</td>
                     </tr>
                 {% endfor %}
             </tbody>

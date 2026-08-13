@@ -1,8 +1,7 @@
 {% comment %}
-Flat per-species stats table (thumbnail, taxonomy, per-stage / view counts, a
-"to review" group of hand-label gaps (stage / box), obs). Expects `rows` (see
-views._index_row) and `stages`. Shared by the legacy index and the genus-level
-browse page.
+Flat per-species stats table for the genus-level browse page (and legacy index).
+Column order: taxonomy, from wiki, from boa, from iNats, stages, view, to review.
+Expects `rows` (see views._index_row) and `stages`.
 {% endcomment %}
 <style>
     .tax-table {
@@ -44,14 +43,21 @@ browse page.
             <th class="tax-col" rowspan="2">family</th>
             <th class="tax-col" rowspan="2">subfamily</th>
             <th class="tax-col" rowspan="2">species</th>
+            <th class="group-head col-group" colspan="1" title="Wikipedia Speciesbox fields">from wiki</th>
+            <th class="group-head col-group" colspan="2" title="Butterflies of America page">from boa</th>
+            <th class="group-head col-group" colspan="2" title="iNaturalist taxon id and observation count">from iNats</th>
             <th class="group-head col-group" colspan="{{ stages|length }}">stages</th>
             <th class="group-head col-group" colspan="4">view</th>
             {% if can_edit %}
             <th class="group-head col-group" colspan="2" title="Hand-label gaps still to review">to review</th>
             {% endif %}
-            <th class="col-group" rowspan="2" title="iNaturalist observation count (from the names CSV)">obs</th>
         </tr>
         <tr>
+            <th class="col-group" title="Downloaded Wikipedia article">article</th>
+            <th class="col-group" title="Link to the Butterflies of America taxon page">page</th>
+            <th title="Number of subspecies rows on Butterflies of America">ssps</th>
+            <th class="col-group" title="iNaturalist taxon id">id</th>
+            <th title="iNaturalist observation count (from the names CSV)">obs</th>
             {% for stage in stages %}
                 <th{% if forloop.first %} class="col-group"{% endif %}>{{ stage }}</th>
             {% endfor %}
@@ -74,13 +80,36 @@ browse page.
                             <img class="tax-thumb" src="{% url 'moths:serve_norm_thumbnail' row.thumbnail %}" alt="{{ row.species|default:row.tax_id }}" loading="lazy">
                         </a>
                     {% else %}
-                        <span class="thumb-empty" title="Visit the poses view to build a thumbnail"></span>
+                        <span class="thumb-empty" title="Visit the species view to build a thumbnail"></span>
                     {% endif %}
                 </td>
                 <td class="tax-col">{{ row.superfamily|default:"—" }}</td>
                 <td class="tax-col">{{ row.family|default:"—" }}</td>
                 <td class="tax-col">{{ row.subfamily|default:"—" }}</td>
-                <td class="tax-col"><a href="{% url 'moths:pose_view' row.tax_id %}" title="{% if row.name %}{{ row.name }} ({{ row.tax_id }}){% else %}{{ row.tax_id }}{% endif %}">{{ row.species|default:row.tax_id }}</a></td>
+                <td class="tax-col"><a href="{% url 'moths:species_view' row.tax_id %}" title="{% if row.name %}{{ row.name }} ({{ row.tax_id }}){% else %}{{ row.tax_id }}{% endif %}">{{ row.species|default:row.tax_id }}</a></td>
+                <td class="num col-group">
+                    {% if row.wiki.article_url %}
+                        <a href="{{ row.wiki.article_url }}" target="_blank" rel="noopener" title="{{ row.wiki.scientific_name }}">link</a>
+                    {% else %}
+                        <span class="zero">—</span>
+                    {% endif %}
+                </td>
+                <td class="num col-group">
+                    {% if row.boa.url %}
+                        <a href="{{ row.boa.url }}" target="_blank" rel="noopener" title="{{ row.boa.location }}">link</a>
+                    {% else %}
+                        <span class="zero">—</span>
+                    {% endif %}
+                </td>
+                <td class="num">
+                    {% if row.boa.has_page %}
+                        {{ row.boa.subspecies }}
+                    {% else %}
+                        <span class="zero">—</span>
+                    {% endif %}
+                </td>
+                <td class="num col-group"><a href="https://www.inaturalist.org/taxa/{{ row.tax_id }}" target="_blank" rel="noopener" title="iNaturalist taxon {{ row.tax_id }}">{{ row.tax_id }}</a></td>
+                <td class="num">{% if row.obs %}{{ row.obs }}{% else %}<span class="zero">—</span>{% endif %}</td>
                 {% for cell in row.stage_cells %}
                     <td class="num{% if forloop.first %} col-group{% endif %}">{% include "moths/_count_cell.html" with count=cell.count tax_id=row.tax_id qkey="stage" qval=cell.stage %}</td>
                 {% endfor %}
@@ -91,7 +120,6 @@ browse page.
                 <td class="num col-group">{% include "moths/_count_cell.html" with count=row.no_stage tax_id=row.tax_id qkey="stage" qval="none" %}</td>
                 <td class="num">{% include "moths/_count_cell.html" with count=row.no_box tax_id=row.tax_id qkey="labeled" qval="no" %}</td>
                 {% endif %}
-                <td class="num col-group">{% if row.obs %}{{ row.obs }}{% else %}<span class="zero">—</span>{% endif %}</td>
             </tr>
         {% endfor %}
     </tbody>

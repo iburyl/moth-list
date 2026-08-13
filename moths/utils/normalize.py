@@ -229,7 +229,7 @@ def compute_normalization(image_filename: str) -> dict | None:
     keypoints = ann.keypoints
 
     # Effective stage/flags (hand-preferred, else prediction) decide the layout,
-    # matching how the poses view groups the image.
+    # matching how the species view groups the image.
     stage, flags, _cls_source = get_class_and_flags_with_source(image_filename)
     is_adult = stage == "Adult"
     suppressed = flags_suppress_normalization(flags)

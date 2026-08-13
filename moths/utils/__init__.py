@@ -230,3 +230,20 @@ from .summary import (
     soft_update_tax_summary,
     update_summary,
 )
+from .wiki import (
+    boa_node_counts,
+    boa_row_from_data,
+    descend_wiki_node,
+    get_data_dir,
+    get_data_summary_path,
+    get_wiki_article_path,
+    get_wiki_summary_path,
+    get_wiki_tax_summary_path,
+    load_data_summary,
+    load_species_data,
+    load_wiki_summary,
+    load_wiki_tax_summary,
+    wiki_node_counts,
+    wiki_row_from_summary,
+    wikipedia_url,
+)

@@ -4,7 +4,7 @@
 {% block title %}{{ image.filename }} — Original{% endblock %}
 
 {% block content %}
-    <h2 class="tax-heading"><a href="{% url 'moths:pose_view' image.tax_id %}{% if filter_qs %}?{{ filter_qs }}{% endif %}">{% tax_name image.tax_id %}</a></h2>
+    <h2 class="tax-heading"><a href="{% url 'moths:species_view' image.tax_id %}{% if filter_qs %}?{{ filter_qs }}{% endif %}">{% tax_name image.tax_id %}</a></h2>
     <div class="detail-header">
         <div class="nav-bar" id="nav-bar"
              data-prev="{% if prev_filename %}{% url 'moths:image_original' prev_filename %}{% if filter_qs %}?{{ filter_qs }}{% endif %}{% endif %}"
@@ -194,7 +194,7 @@
                     <span class="star-text">{% if starred %}Starred{% else %}Star{% endif %}</span>
                 </button>
                 <p class="star-status muted" id="star-status">
-                    {% if starred %}Shown first in the poses view.{% else %}Not starred.{% endif %}
+                    {% if starred %}Shown first in the species view.{% else %}Not starred.{% endif %}
                 </p>
             </div>
 
@@ -842,7 +842,7 @@
                 icon.innerHTML = starred ? "\u2605" : "\u2606";
                 text.textContent = starred ? "Starred" : "Star";
                 status.textContent = starred
-                    ? "Shown first in the poses view."
+                    ? "Shown first in the species view."
                     : "Not starred.";
             }
 

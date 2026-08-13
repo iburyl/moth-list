@@ -1,4 +1,4 @@
-"""Unified stage/pose/flag group definitions for the poses view.
+"""Unified stage/pose/flag group definitions for the species view.
 
 A single source of truth for *how images are grouped and in what order* on a
 species' poses page. It lives here (rather than in ``views``) so non-view code

@@ -222,7 +222,7 @@ def pose_row_needs_rebuild(row, file_versions) -> bool:
     Stale when the row is explicitly flagged (``needs_rebuild``, set after a
     manual keypoint edit) or any metric's effective version (per-image override,
     else file-level ``file_versions``, else the legacy baseline) differs from
-    the current one. Used by the poses view to show a per-plate "rebuild" note.
+    the current one. Used by the species view to show a per-plate "rebuild" note.
     """
     if not isinstance(row, dict):
         return False
@@ -340,7 +340,7 @@ def load_pose_data_raw(tax_id: str) -> dict | None:
     """Return cached pose data *ignoring* the version, or ``None`` if unusable.
 
     Unlike :func:`load_pose_data`, a version mismatch is not treated as absent:
-    the parsed dict is returned so the poses view can still display the images
+    the parsed dict is returned so the species view can still display the images
     (grouped by their cached pose) while flagging them for rebuild. Callers
     check ``data["version"] == POSE_DATA_VERSION`` themselves. Returns ``None``
     only when the file is missing, unparseable, or malformed.
@@ -445,7 +445,7 @@ def verify_pose_row(tax_id: str, image_filename: str) -> dict | None:
     The refreshed row's per-metric versions are documented in a per-image
     ``metric_versions`` override when they differ from the file-level baseline.
     Returns the current row. This is the only place recomputation is triggered
-    outside an explicit rebuild — the poses view reads the cache as-is.
+    outside an explicit rebuild — the species view reads the cache as-is.
     """
     data = load_pose_data_raw(tax_id)
     if data is None:
@@ -497,7 +497,7 @@ def mark_pose_row_stale(tax_id: str, image_filename: str) -> None:
     """Flag one image's cached pose row for rebuild after a manual keypoint edit.
 
     Sets ``needs_rebuild`` on the row in ``<tax_id>_pose_data.json`` without
-    recomputing anything, so the poses view can show a "to be rebuild" note.
+    recomputing anything, so the species view can show a "to be rebuild" note.
     A no-op when no pose data has been cached yet (the first build computes it
     fresh). Works on version-mismatched files too (whole file rebuilds anyway).
     """

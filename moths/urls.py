@@ -16,9 +16,9 @@ urlpatterns = [
         name="species_info",
     ),
     path("tax/<str:tax_id>/", views.tax_detail, name="tax_detail"),
-    path("tax/<str:tax_id>/poses/", views.pose_view, name="pose_view"),
+    path("tax/<str:tax_id>/species/", views.species_view, name="species_view"),
     path(
-        "tax/<str:tax_id>/poses/rebuild",
+        "tax/<str:tax_id>/species/rebuild",
         views.rebuild_poses,
         name="rebuild_poses",
     ),

@@ -185,7 +185,7 @@ def get_prediction_class_path(image_filename: str) -> Path:
     """Path to the predicted ``.class`` sidecar in the prediction directory.
 
     The prediction pipeline writes a stage/flags ``.class`` file next to each
-    prediction (same format as the hand ``classes/`` files) so the poses view
+    prediction (same format as the hand ``classes/`` files) so the species view
     can fall back to it when an image has no hand classification.
     """
     name = image_basename(image_filename)
@@ -221,7 +221,7 @@ def get_class_and_flags_with_source(image_filename: str) -> tuple[str | None, li
     ``MOTHS_PREDICTION_DIR`` (``source == "prediction"``). ``source`` is ``None``
     when neither has any classification. Only the hand file is authoritative:
     once it carries any stage/flag it is used as-is (predictions are not merged
-    in). Used by the poses view so predicted stage/flags group images too.
+    in). Used by the species view so predicted stage/flags group images too.
     """
     stage, flags = _read_class_file(get_class_path(image_filename))
     if stage or flags:

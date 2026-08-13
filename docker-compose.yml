@@ -30,6 +30,7 @@ services:
       MOTHS_PREDICTION_DIR: /srv/prediction
       MOTHS_LABEL_DIR: /srv/labels
       MOTHS_THUMBNAIL_DIR: /srv/cache
+      MOTHS_DATA_DIR: /srv/data
       TAX_CSV: /srv/names.csv
       DJANGO_DB_PATH: /data/db.sqlite3
     volumes:
@@ -37,9 +38,10 @@ services:
       - "${MOTHS_IMAGE_DIR_HOST}:/srv/images:ro"
       - "${MOTHS_PREDICTION_DIR_HOST}:/srv/prediction:ro"
       - "${MOTHS_NAMES_CSV_HOST}:/srv/names.csv:ro"
-      # Writable (pose data / summaries / .class / starred, and the crop cache).
+      # Writable (pose data / summaries / .class / starred, crop cache, wiki data).
       - "${MOTHS_LABEL_DIR_HOST}:/srv/labels"
       - "${MOTHS_THUMBNAIL_DIR_HOST}:/srv/cache"
+      - "${MOTHS_DATA_DIR_HOST}:/srv/data"
       # Persistent sqlite (auth/sessions/admin).
       - moths_db:/data
     expose:

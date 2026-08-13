@@ -17,7 +17,7 @@ area-normalised (density) so the small starred subset stays comparable to the
 much larger population.
 
 Image groups (classified from the cached ``pose`` + ``flags``, matching the
-poses view):
+species view):
 
     top_down          pose == top-down and not Pinned
     top_down_pinned   pose == top-down and Pinned

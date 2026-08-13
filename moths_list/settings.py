@@ -193,6 +193,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 #     set MOTHS_PREDICTION_DIR=...\test
 #     set MOTHS_LABEL_DIR=...\labels
 #     set MOTHS_THUMBNAIL_DIR=...\cache
+#     set MOTHS_DATA_DIR=...\data
 
 
 def _required_env(name: str) -> str:
@@ -226,6 +227,11 @@ MOTHS_THUMBNAIL_DIR = _required_env("MOTHS_THUMBNAIL_DIR")
 # name. Used to display friendly species labels (with a "{name} ({id})" title)
 # wherever a tax_id appears.
 MOTHS_NAMES_CSV = _required_env("TAX_CSV")
+
+# Per-taxon harvested reference data (e.g. Wikipedia wikitext under
+# ``<tax_id>/<tax_id>.wiki``). Written by tools/harvest_wiki.py; empty
+# ``<tax_id>/`` folders mean no matching wiki page was found.
+MOTHS_DATA_DIR = _required_env("MOTHS_DATA_DIR")
 
 # Max thumbnail size (width, height) in pixels; aspect ratio is preserved.
 MOTHS_THUMBNAIL_SIZE = (400, 400)

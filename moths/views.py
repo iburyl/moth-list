@@ -61,6 +61,8 @@ from .utils import (
     load_starred,
     load_summary,
     load_tax_summary,
+    load_wiki_summary,
+    load_wiki_tax_summary,
     mark_pose_row_stale,
     pose_data_version_ok,
     pose_row_needs_rebuild,
@@ -75,6 +77,11 @@ from .utils import (
     tax_id_for_file,
     update_summary,
     verify_pose_row,
+    boa_node_counts,
+    boa_row_from_data,
+    load_species_data,
+    wiki_node_counts,
+    wiki_row_from_summary,
 )
 
 # Unified stage/pose/flag group definitions now live in moths.utils.groups (a
@@ -112,7 +119,7 @@ def _index_row(tax_id: str) -> dict:
 
     Read-only: never builds here (that is the heavy path). A tax with no cached
     summary yet renders with "—" placeholders; its summary is built when the
-    poses view is entered. Names/obs come straight from the (mtime-cached) names
+    species view is entered. Names/obs come straight from the (mtime-cached) names
     CSV, so they show even before a summary exists. Reused by the legacy flat
     index and by the genus-level browse page (its species listing).
     """
@@ -153,6 +160,9 @@ def _index_row(tax_id: str) -> dict:
         "view_cells": [_view_cell(pose) for pose in VIEW_POSES],
         "no_stage": counts.get("no_stage", 0) if has_summary else None,
         "no_box": counts.get("no_box", 0) if has_summary else None,
+        # Wiki / BOA decoration from MOTHS_DATA_DIR (not the listing base).
+        "wiki": wiki_row_from_summary(load_wiki_summary(tax_id)),
+        "boa": boa_row_from_data(load_species_data(tax_id).get("boa")),
     }
 
 
@@ -252,10 +262,11 @@ def browse(request, lineage=""):
     for the "(unknown)" bucket. Walking is a plain descent through the aggregate
     file's nested ``children`` maps — O(depth) lookups, no file scan. Each page
     lists the current node's direct children with their coverage counts; the
-    species leaves under a genus link straight to the poses view (there is no
+    species leaves under a genus link straight to the species view (there is no
     browse page for a single species).
     """
     data = load_tax_summary()
+    wiki_tree = load_wiki_tax_summary()
     segs = [s for s in lineage.split("/") if s]
     keys = [_browse_seg_to_key(s, i) for i, s in enumerate(segs)]
 
@@ -270,15 +281,33 @@ def browse(request, lineage=""):
     # Descend the tree by key: the root's children live under "superfamilies",
     # every deeper node's under "children".
     node = data
+    wiki_node = wiki_tree
     for key in keys:
         container = node["superfamilies"] if node is data else node["children"]
         child = container.get(key)
         if child is None:
             return render(request, "moths/browse.html", {"unknown": True, "lineage": lineage})
         node = child
+        # Wiki coverage is optional; keep descending when the labels path exists.
+        if wiki_node is not None:
+            wiki_container = (
+                wiki_node.get("superfamilies")
+                if wiki_node is wiki_tree
+                else wiki_node.get("children")
+            )
+            wiki_node = wiki_container.get(key) if isinstance(wiki_container, dict) else None
 
     depth = len(keys)
     container = node["superfamilies"] if node is data else node["children"]
+    wiki_container = None
+    if wiki_node is not None:
+        wiki_container = (
+            wiki_node.get("superfamilies")
+            if wiki_node is wiki_tree
+            else wiki_node.get("children")
+        )
+        if not isinstance(wiki_container, dict):
+            wiki_container = None
 
     # Collapse the subfamily level when a family isn't subdivided: if the only
     # subfamily is the "not subdivided" bucket ("-"), list its genera directly
@@ -287,6 +316,12 @@ def browse(request, lineage=""):
     url_prefix = list(segs)
     if depth == 2 and set(container) == {_NO_SUBFAMILY}:
         container = container[_NO_SUBFAMILY]["children"]
+        if wiki_container and _NO_SUBFAMILY in wiki_container:
+            wiki_container = wiki_container[_NO_SUBFAMILY].get("children")
+            if not isinstance(wiki_container, dict):
+                wiki_container = None
+        else:
+            wiki_container = None
         url_prefix = segs + [_browse_key_to_seg(_NO_SUBFAMILY)]
         depth = 3
 
@@ -310,6 +345,9 @@ def browse(request, lineage=""):
                 "thumbnail": _browse_thumb_filename(child.get("thumbnail")),
             }
             row.update({ck: child.get(ck, 0) for ck in _BROWSE_ROW_KEYS})
+            wiki_child = wiki_container.get(key) if wiki_container else None
+            row["wiki"] = wiki_node_counts(wiki_child)
+            row["boa"] = boa_node_counts(wiki_child)
             children.append(row)
 
     crumbs = [{"label": "All", "url": reverse("moths:browse")}]
@@ -380,7 +418,7 @@ def _build_search_entries() -> list[dict]:
 
     Every superfamily/family/subfamily/genus node becomes a "higher" entry that
     links to its browse page; every *present* species leaf (an image folder or
-    cached images) becomes a "species" entry linking to its poses view. Bucket
+    cached images) becomes a "species" entry linking to its species view. Bucket
     keys ("(unknown)" / "-") are traversed but never themselves searchable.
     Each entry carries the lowercased strings it can be matched on plus its
     rank depth for ordering.
@@ -424,7 +462,7 @@ def _build_search_entries() -> list[dict]:
                             "detail": common if (species and common) else "species",
                             "kind": "species",
                             "depth": 4,
-                            "url": reverse("moths:pose_view", args=[str(tax_id)]),
+                            "url": reverse("moths:species_view", args=[str(tax_id)]),
                             "search": [
                                 s.lower()
                                 for s in (species, common, str(tax_id))
@@ -471,7 +509,7 @@ def taxon_search(request):
     genus names and species (scientific + common name + id). Results are ordered
     by match quality (exact, prefix, substring), then by broader taxonomic rank,
     then alphabetically, and capped to five. Each result carries the target
-    ``url`` (browse page for a rank, poses view for a species) so the client can
+    ``url`` (browse page for a rank, species view for a species) so the client can
     navigate on Enter/selection.
     """
     q = (request.GET.get("q") or "").strip().lower()
@@ -508,7 +546,7 @@ def observation_lookup(request):
 def species_info(request, tax_id):
     """JSON: whether we track ``tax_id`` plus its starred reference image(s).
 
-    ``starred`` lists the tax's starred images ordered like the poses view
+    ``starred`` lists the tax's starred images ordered like the species view
     (highest cumulative score first); ``reference`` is the first of those (or
     the recorded tax thumbnail as a fallback when nothing is starred yet).
     """
@@ -553,7 +591,7 @@ def species_info(request, tax_id):
             "reference": reference,
             "starred": starred_entries,
             "poses_url": (
-                reverse("moths:pose_view", args=[tax_id]) if exists else None
+                reverse("moths:species_view", args=[tax_id]) if exists else None
             ),
         }
     )
@@ -609,12 +647,12 @@ def _filter_images(images, stage_filter, labeled_filter, pose_filter):
 
 
 def tax_detail(request, tax_id):
-    """Legacy list route: now folded into the unified poses view.
+    """Legacy list route: now folded into the unified species view.
 
     Kept so existing links (e.g. the index page's clickable counts) keep
-    working; it redirects to :func:`pose_view`, preserving any active filters.
+    working; it redirects to :func:`species_view`, preserving any active filters.
     """
-    url = reverse("moths:pose_view", args=[tax_id])
+    url = reverse("moths:species_view", args=[tax_id])
     query = request.GET.urlencode()
     if query:
         url = f"{url}?{query}"
@@ -714,7 +752,7 @@ def _build_unified_groups(tax_id, image_list, cached):
     label file so it still lands in the right group. Cached metric values are
     shown as-is (even if their version is stale or the keypoints changed) —
     :func:`_make_row` never blanks them; a rebuild refreshes them. This keeps
-    the poses view a pure read — the caller shows a "needs rebuild" banner and
+    the species view a pure read — the caller shows a "needs rebuild" banner and
     the explicit Rebuild button regenerates the cache.
 
     Each image is placed in its flag subsection(s) when flagged, otherwise in its
@@ -789,8 +827,8 @@ def _tax_stub(request, tax_id, unknown):
     return render(request, "moths/tax_stub.html", context)
 
 
-def pose_view(request, tax_id):
-    """Unified per-tax view: images grouped by stage, adults split by pose.
+def species_view(request, tax_id):
+    """Unified per-tax species view: images grouped by stage, adults by pose.
 
     This view is a **pure read** — it never rebuilds a cache in the background.
     The states it distinguishes:
@@ -851,8 +889,10 @@ def pose_view(request, tax_id):
         "filter_desc": _filter_desc(stage_filter, labeled_filter, pose_filter),
         "is_filtered": bool(stage_filter or labeled_filter or pose_filter),
         "filter_qs": request.GET.urlencode(),
+        # Optional Wikipedia / Speciesbox decoration from MOTHS_DATA_DIR.
+        "wiki": wiki_row_from_summary(load_wiki_summary(tax_id)),
     }
-    return render(request, "moths/tax_poses.html", context)
+    return render(request, "moths/species_view.html", context)
 
 
 @editor_required
@@ -871,7 +911,7 @@ def rebuild_poses(request, tax_id):
     build_pose_data(tax_id, images)
     build_summary(tax_id, images)
 
-    url = reverse("moths:pose_view", args=[tax_id])
+    url = reverse("moths:species_view", args=[tax_id])
     query = request.GET.urlencode()
     if query:
         url = f"{url}?{query}"
@@ -892,7 +932,7 @@ def _ordered_nav(request, image):
     filtered = _filter_images(images, stage_filter, labeled_filter, pose_filter)
 
     # Read the pose cache as-is (navigation never rebuilds); grouping falls back
-    # to live classification for uncached images, matching the poses view.
+    # to live classification for uncached images, matching the species view.
     cached = load_pose_data_raw(image.tax_id)
 
     def ordered(image_list):
@@ -1024,7 +1064,7 @@ def image_normalized(request, filename):
 
     # Verify the keypoints against the live pose source and recompute this
     # image's normalized crop + scores if they changed. This is the only place
-    # that recompute is triggered (the poses view reads the cache as-is).
+    # that recompute is triggered (the species view reads the cache as-is).
     metrics = verify_pose_row(image.tax_id, filename)
     if metrics:
         sharpness = metrics.get("sharpness")
@@ -1102,7 +1142,7 @@ def set_selection_stage(request, tax_id):
 
     Body is JSON ``{"stage": "Adult", "filenames": [...]}``. Every listed image
     that belongs to this tax_id is (re)labelled with the stage, regardless of any
-    current class. Backs the poses view's selection mode. Returns how many were
+    current class. Backs the species view's selection mode. Returns how many were
     updated.
     """
     try:
@@ -1168,7 +1208,7 @@ def confirm_selection_prediction(request, tax_id):
     Body is JSON ``{"filenames": [...]}``. For each listed image of this tax_id
     that has a predicted ``.class`` (stage and/or flags), those predicted values
     are written as the hand stage/flags — i.e. the prediction is "confirmed".
-    Images without any prediction are skipped. Backs the poses view's selection
+    Images without any prediction are skipped. Backs the species view's selection
     mode. Returns how many were confirmed.
     """
     try:
@@ -1224,7 +1264,7 @@ def save_label(request, filename):
     tax_id = tax_id_for_file(filename)
     update_summary(tax_id)
     # Keypoints just changed: flag the cached pose row for rebuild (deferred;
-    # the poses view shows "to be rebuild" until the next rebuild).
+    # the species view shows "to be rebuild" until the next rebuild).
     mark_pose_row_stale(tax_id, filename)
     return JsonResponse({
         "ok": True,

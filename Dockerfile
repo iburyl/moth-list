@@ -42,6 +42,7 @@ COPY moths ./moths
 # fails loudly instead of silently pointing at bogus directories.
 RUN MOTHS_IMAGE_DIR=/nonexistent MOTHS_LABEL_DIR=/nonexistent \
     MOTHS_PREDICTION_DIR=/nonexistent MOTHS_THUMBNAIL_DIR=/nonexistent \
+    MOTHS_DATA_DIR=/nonexistent \
     TAX_CSV=/nonexistent/names.csv \
     python manage.py collectstatic --noinput
 

@@ -24,12 +24,12 @@ class Flag:
 
     * ``normalize`` – when ``False``, images carrying the flag are never
       pose-normalized: the normalized view/thumbnail falls back to the plain
-      image and the poses view shows them in a plain (score-less) subsection.
+      image and the species view shows them in a plain (score-less) subsection.
     * ``train`` – when ``False``, images carrying the flag are excluded from
       every training archive built by ``tools/prepare_train_data.py``.
     * ``stages`` – the life-cycle stages the flag is offered for (a subset of
       :data:`STAGES`); an empty tuple means all stages. Drives the flag picker
-      in the edit view and which per-stage flag subsections the poses view
+      in the edit view and which per-stage flag subsections the species view
       builds.
     """
 
