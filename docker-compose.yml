@@ -33,6 +33,13 @@ services:
       MOTHS_DATA_DIR: /srv/data
       TAX_CSV: /srv/names.csv
       DJANGO_DB_PATH: /data/db.sqlite3
+    # The image runs as appuser (uid 10001), but the dataset on the host belongs
+    # to the deploy user (uid/gid 1000) so the tools/ pipeline can write it too.
+    # Joining gid 1000 as a supplementary group makes the group-writable (664)
+    # files and (775) directories writable from the container as well, without
+    # taking ownership away from the host user.
+    group_add:
+      - "1000"
     volumes:
       # Read-only inputs.
       - "${MOTHS_IMAGE_DIR_HOST}:/srv/images:ro"

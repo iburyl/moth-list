@@ -184,6 +184,55 @@ else:
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 
+# --- Logging -----------------------------------------------------------------
+# Django's built-in configuration routes request errors to a console handler
+# filtered by ``require_debug_true`` plus ``mail_admins``, so with DEBUG off and
+# no ADMINS a 500 is discarded without a trace. Log to stderr unconditionally
+# instead: under gunicorn that is the container log (``docker compose logs web``).
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "{levelname} {asctime} {name} {message}",
+            "style": "{",
+        },
+        # Keeps runserver's request lines looking the way Django formats them.
+        "django.server": {
+            "()": "django.utils.log.ServerFormatter",
+            "format": "[{server_time}] {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {"class": "logging.StreamHandler", "formatter": "verbose"},
+        "django.server": {
+            "class": "logging.StreamHandler",
+            "formatter": "django.server",
+        },
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console"],
+            "level": os.environ.get("DJANGO_LOG_LEVEL", "INFO"),
+        },
+        # Unhandled view exceptions arrive here with exc_info, so the traceback
+        # of every 500 is printed.
+        "django.request": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+        "django.server": {
+            "handlers": ["django.server"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+}
+
+
 # --- Moth dataset locations --------------------------------------------------
 # Every path below must be provided explicitly via environment variables; there
 # are no built-in defaults. A minimal, sufficient set is::
