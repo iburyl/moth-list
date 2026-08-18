@@ -74,6 +74,7 @@ services:
       - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
       - "${MOTHS_CADDY_DIR_HOST}/data:/data"
       - "${MOTHS_CADDY_DIR_HOST}/config:/config"
+      - "${MOTHS_CADDY_DIR_HOST}/log:/log"
 
 volumes:
   moths_db:

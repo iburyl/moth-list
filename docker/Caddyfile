@@ -4,6 +4,9 @@
 # SITE_DOMAIN and proxies HTTPS traffic to gunicorn (the `web` service on the
 # compose network). SITE_DOMAIN / ACME_EMAIL are injected from the environment
 # (see docker-compose.yml, sourced from .env).
+#
+# Access logs land on the host at ``$MOTHS_CADDY_DIR_HOST/log/access.log``
+# (mounted at ``/log``). App-layer errors stay on the web container.
 
 {
 	email {$ACME_EMAIL}
@@ -11,5 +14,23 @@
 
 {$SITE_DOMAIN} {
 	encode zstd gzip
+
+	# External traffic log: real client IP (Caddy terminates TLS), method, URI,
+	# status, User-Agent, duration. ``console`` is line-oriented and readable
+	# with tail/less/grep; switch to ``format json`` if you prefer tooling (jq).
+	#
+	# Growth is capped by rotation (gzipped backups by default): at most
+	# ``roll_keep`` files of ``roll_size``, and nothing older than ``roll_keep_for``.
+	# With the values below that is roughly ≤50 MiB of rolled data + one active file.
+	log {
+		output file /log/access.log {
+			roll_size 10MiB
+			roll_keep 5
+			roll_keep_for 168h
+			roll_interval 24h
+		}
+		format console
+	}
+
 	reverse_proxy web:8000
 }
