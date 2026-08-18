@@ -867,7 +867,11 @@
                     .catch(function () { status.textContent = "Save failed."; });
             }
 
-            btn.addEventListener("click", toggle);
+            btn.addEventListener("click", function () {
+                toggle();
+                // Drop focus so the page keyboard shortcuts keep working.
+                btn.blur();
+            });
 
             // 'f' toggles the star (unless typing in a field).
             document.addEventListener("keydown", function (e) {

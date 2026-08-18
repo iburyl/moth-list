@@ -1,6 +1,7 @@
 {% comment %}
 Flat per-species stats table for the genus-level browse page (and legacy index).
-Column order: taxonomy, from wiki, from boa, from iNats, stages, view, to review.
+Column order: taxonomy, from wiki, from boa, from PNW, from iNats, from GBIF,
+stages, view, to review.
 Expects `rows` (see views._index_row) and `stages`.
 {% endcomment %}
 <style>
@@ -21,6 +22,7 @@ Expects `rows` (see views._index_row) and `stages`.
     .tax-table tbody tr:hover { background: #8881; }
     .tax-table td.num { font-variant-numeric: tabular-nums; }
     .tax-table .zero { color: #9ca3af; }
+    .tax-table .flag-no { color: #dc2626; font-weight: 600; }
     .tax-table .part { font-weight: 600; text-decoration: none; }
     .tax-table .part:hover { text-decoration: underline; }
     .tax-table a { font-weight: 600; }
@@ -45,7 +47,9 @@ Expects `rows` (see views._index_row) and `stages`.
             <th class="tax-col" rowspan="2">species</th>
             <th class="group-head col-group" colspan="1" title="Wikipedia Speciesbox fields">from wiki</th>
             <th class="group-head col-group" colspan="2" title="Butterflies of America page">from boa</th>
-            <th class="group-head col-group" colspan="2" title="iNaturalist taxon id and observation count">from iNats</th>
+            <th class="group-head col-group" colspan="1" title="Pacific Northwest Moths page">from PNW</th>
+            <th class="group-head col-group" colspan="3" title="iNaturalist taxon id, observation count, and computer-vision model coverage">from iNats</th>
+            <th class="group-head col-group" colspan="2" title="GBIF backbone usage key and occurrence count">from GBIF</th>
             <th class="group-head col-group" colspan="{{ stages|length }}">stages</th>
             <th class="group-head col-group" colspan="4">view</th>
             {% if can_edit %}
@@ -56,8 +60,12 @@ Expects `rows` (see views._index_row) and `stages`.
             <th class="col-group" title="Downloaded Wikipedia article">article</th>
             <th class="col-group" title="Link to the Butterflies of America taxon page">page</th>
             <th title="Number of subspecies rows on Butterflies of America">ssps</th>
+            <th class="col-group" title="Link to the Pacific Northwest Moths species page">page</th>
             <th class="col-group" title="iNaturalist taxon id">id</th>
-            <th title="iNaturalist observation count (from the names CSV)">obs</th>
+            <th title="iNaturalist observation count (from data_summary)">obs</th>
+            <th title="Whether iNaturalist includes this taxon in its computer-vision / ML model">ML</th>
+            <th class="col-group" title="GBIF usage key (link to taxon page)">id</th>
+            <th title="GBIF PRESENT occurrence count">obs</th>
             {% for stage in stages %}
                 <th{% if forloop.first %} class="col-group"{% endif %}>{{ stage }}</th>
             {% endfor %}
@@ -108,8 +116,30 @@ Expects `rows` (see views._index_row) and `stages`.
                         <span class="zero">—</span>
                     {% endif %}
                 </td>
+                <td class="num col-group">
+                    {% if row.pnw.url %}
+                        <a href="{{ row.pnw.url }}" target="_blank" rel="noopener" title="{{ row.pnw.name }}{% if row.pnw.common_name %} — {{ row.pnw.common_name }}{% endif %}">link</a>
+                    {% else %}
+                        <span class="zero">—</span>
+                    {% endif %}
+                </td>
                 <td class="num col-group"><a href="https://www.inaturalist.org/taxa/{{ row.tax_id }}" target="_blank" rel="noopener" title="iNaturalist taxon {{ row.tax_id }}">{{ row.tax_id }}</a></td>
                 <td class="num">{% if row.obs %}{{ row.obs }}{% else %}<span class="zero">—</span>{% endif %}</td>
+                <td class="num">
+                    {% if row.inats.vision %}
+                        yes
+                    {% else %}
+                        <span class="flag-no">no</span>
+                    {% endif %}
+                </td>
+                <td class="num col-group">
+                    {% if row.gbif.has_taxon and row.gbif.url %}
+                        <a href="{{ row.gbif.url }}" target="_blank" rel="noopener" title="{% if row.gbif.scientificName %}{{ row.gbif.scientificName }}{% if not row.gbif.accepted %} (synonym){% endif %}{% else %}GBIF {{ row.gbif.usageKey }}{% endif %}">{{ row.gbif.usageKey }}</a>
+                    {% else %}
+                        <span class="zero">—</span>
+                    {% endif %}
+                </td>
+                <td class="num">{% if row.gbif.observations_count %}{{ row.gbif.observations_count }}{% else %}<span class="zero">—</span>{% endif %}</td>
                 {% for cell in row.stage_cells %}
                     <td class="num{% if forloop.first %} col-group{% endif %}">{% include "moths/_count_cell.html" with count=cell.count tax_id=row.tax_id qkey="stage" qval=cell.stage %}</td>
                 {% endfor %}

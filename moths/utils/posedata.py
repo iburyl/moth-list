@@ -167,13 +167,15 @@ def refresh_tax_thumbnail(tax_id: str, per_image: dict | None = None) -> str | N
 # (clamp(a*ln(sharpness)+b, 0, 1)) instead of ``min(sharpness, 30000)/30000``.
 # v17: sharpness score re-anchored to log(sharpness) 9->0.5, 11->1.0
 # (a=0.25, b=-1.75) — a gentler low end than the fitted line.
+# v18: same-side wings within 5° of F→B recover top_down/bottom_up from the
+# F→L / F→R winding (collapsed wing tips, e.g. Plutella xylostella).
 # NOTE: from here on, changes to an individual metric's computation are tracked
 # by that metric's own version (see moths.utils.metrics.METRIC_VERSIONS), which
 # is recorded in the file (``metric_versions``) and lets a rebuild recompute
 # only the changed metric. Bump POSE_DATA_VERSION only for *structural* row
 # schema changes (not for metric formula tweaks). Pre-metric-version files (no
 # ``metric_versions`` key) are assumed to hold the v17-current metric values.
-POSE_DATA_VERSION = 17
+POSE_DATA_VERSION = 18
 
 
 # Sentinel version for a cached metric that must be recomputed on the next

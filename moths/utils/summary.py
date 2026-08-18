@@ -61,13 +61,14 @@ SUMMARY_VERSION = 6
 # Bump when the hierarchical tax_summary.json schema changes so old files are
 # ignored (a version mismatch makes soft updates a no-op until a full rebuild).
 # v2: every node carries a representative ``thumbnail`` (best descendant image).
-# v3: nodes also aggregate species_have_folder / no_stage / no_box / obs (for the
+# v3: nodes also aggregate species_have_folder / no_stage / no_box (for the
 #     browse columns), and leaves cache those per-species from CSV + summaries.
 # v4: an absent subfamily is keyed "-" ("not subdivided"), distinct from the
 #     "(unknown)" bucket used for a genuinely missing higher rank.
 # v5: nodes also aggregate ``images`` (total images under the node) for the
 #     browse "images" column.
-TAX_TREE_VERSION = 5
+# v6: ``obs`` removed — iNat observation counts live in data/tax_summary.json.
+TAX_TREE_VERSION = 6
 
 # Viewpoint buckets shown in the index "view" column group, in display order.
 VIEW_POSES = [POSE_TOP_DOWN, POSE_SIDE, POSE_BOTTOM_UP, POSE_UNCLEAR]
@@ -263,7 +264,8 @@ def update_summary(tax_id: str | None) -> None:
 # One aggregate file rolls the ~900 per-species summaries up the taxonomy so a
 # future hierarchical index can render without walking every species. Structure
 # (nested "children" maps): superfamily -> family -> subfamily -> genus ->
-# species leaf. The "want to cover" universe is every row of the names CSV;
+# species leaf. The "want to cover" universe is every species in
+# ``data_summary.json`` (from ``parse_data_summary`` / inats_summary);
 # genus is the first word of that row's ``species`` field. A species is
 # considered "have" once its per-tax summary JSON exists, and it "has an image"
 # when that summary reports ``counts.total > 0``.
@@ -278,11 +280,12 @@ def update_summary(tax_id: str | None) -> None:
 #   species_have_zero   - species with a summary but zero images
 #   species_have_folder - species with an image subfolder on disk
 #   no_stage / no_box   - summed hand-annotation gaps across those species
-#   obs                 - summed iNaturalist observation counts (from the CSV)
 # Genus nodes add ``species_want_ids`` / ``species_have_ids`` (the requested
 # per-species iNaturalist id lists); their children are species leaves
-# (``{species, name, have, has_image, has_folder, thumbnail, no_stage, no_box,
-# obs}``). The root mirrors the aggregate counts across all superfamilies.
+# (``{species, name, have, has_image, has_folder, thumbnail, no_stage, no_box}``).
+# The root mirrors the aggregate counts across all superfamilies.
+# iNaturalist observation counts are not stored here — see
+# ``MOTHS_DATA_DIR/tax_summary.json`` (from ``parse_data_summary.py``).
 #
 # Every node (and species leaf) also carries a ``thumbnail`` — the per-species
 # representative image dict (``{filename, score, starred}``) chosen by
@@ -368,20 +371,12 @@ def _species_summary_state(tax_id: str) -> dict:
     }
 
 
-def _parse_obs(value) -> int:
-    """Parse the names-CSV ``obs`` field (iNat observation count) to an int."""
-    try:
-        return int(str(value).strip() or 0)
-    except (ValueError, TypeError):
-        return 0
-
-
 def _build_species_leaf(tax_id: str, info: dict) -> dict:
-    """Assemble a species leaf from the names CSV row + its cached summary.
+    """Assemble a species leaf from data_summary lineage + cached pose summary.
 
     Centralises leaf construction so the full rebuild and the soft update store
     identical fields. ``has_folder`` reflects whether the tax has an image
-    subfolder on disk (the "existing folders" count); ``obs`` comes from the CSV.
+    subfolder on disk (the "existing folders" count).
     """
     state = _species_summary_state(tax_id)
     return {
@@ -394,7 +389,6 @@ def _build_species_leaf(tax_id: str, info: dict) -> dict:
         "images": state["images"],
         "no_stage": state["no_stage"],
         "no_box": state["no_box"],
-        "obs": _parse_obs(info.get("obs")),
     }
 
 
@@ -426,7 +420,6 @@ def _genus_counts(species_map: dict) -> dict:
     images = sum(leaf.get("images", 0) for leaf in species_map.values())
     no_stage = sum(leaf.get("no_stage", 0) for leaf in species_map.values())
     no_box = sum(leaf.get("no_box", 0) for leaf in species_map.values())
-    obs = sum(leaf.get("obs", 0) for leaf in species_map.values())
     want = len(species_map)
     have = len(have_ids)
     return {
@@ -442,7 +435,6 @@ def _genus_counts(species_map: dict) -> dict:
         "images": images,
         "no_stage": no_stage,
         "no_box": no_box,
-        "obs": obs,
         "species_want_ids": want_ids,
         "species_have_ids": have_ids,
     }
@@ -453,7 +445,7 @@ def _aggregate_children(children: dict) -> dict:
     want = len(children)
     have_any = have_all = 0
     species_want = species_have_image = species_have_zero = 0
-    species_have_folder = images = no_stage = no_box = obs = 0
+    species_have_folder = images = no_stage = no_box = 0
     for child in children.values():
         child_have = child["species_have_image"] + child["species_have_zero"]
         if child_have > 0:
@@ -467,7 +459,6 @@ def _aggregate_children(children: dict) -> dict:
         images += child.get("images", 0)
         no_stage += child.get("no_stage", 0)
         no_box += child.get("no_box", 0)
-        obs += child.get("obs", 0)
     return {
         "want": want,
         "have_any": have_any,
@@ -479,7 +470,6 @@ def _aggregate_children(children: dict) -> dict:
         "images": images,
         "no_stage": no_stage,
         "no_box": no_box,
-        "obs": obs,
     }
 
 
@@ -533,7 +523,6 @@ def _empty_parent_node() -> dict:
         "images": 0,
         "no_stage": 0,
         "no_box": 0,
-        "obs": 0,
         "thumbnail": None,
         "children": {},
     }
@@ -568,12 +557,12 @@ def _write_tax_summary(data: dict) -> None:
 
 
 def build_tax_summary() -> dict:
-    """Rebuild ``labels/tax_summary.json`` from the names CSV + per-tax summaries.
+    """Rebuild ``labels/tax_summary.json`` from data_summary + per-tax summaries.
 
-    The full ("complete") rebuild path: every names-CSV row is placed in the
-    superfamily/family/subfamily/genus/species tree and its ``have`` /
-    ``has_image`` state is read from ``labels/{id}_summary.json``. Used by
-    ``tools/rebuild_poses.py``.
+    The full ("complete") rebuild path: every ``data_summary.json`` species is
+    placed in the superfamily/family/subfamily/genus/species tree and its
+    ``have`` / ``has_image`` state is read from ``labels/{id}_summary.json``.
+    Used by ``tools/rebuild_poses.py``.
     """
     names = load_names()
     tree: dict = {}
@@ -622,7 +611,7 @@ def soft_update_tax_summary(tax_id: str) -> None:
     subfamily/genus lineage (plus the root), re-picking each level's
     representative thumbnail on the way up. No-ops when the aggregate is
     missing/stale (a full rebuild will regenerate it) or the tax_id is absent
-    from the names CSV, and skips the write when nothing changed.
+    from ``data_summary.json``, and skips the write when nothing changed.
     """
     data = load_tax_summary()
     if data is None:

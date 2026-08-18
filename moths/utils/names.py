@@ -1,4 +1,13 @@
-"""Taxonomy-name CSV and iNaturalist observation metadata lookups."""
+#!/usr/bin/env python3
+"""Taxonomy-name lookups and iNaturalist observation metadata.
+
+Runtime name info (``load_names`` / ``get_name_info``) comes from
+``data_summary.json`` (built by ``tools/parse_data_summary.py`` from
+``inats_summary.json``).
+
+``load_names_csv`` remains only for ``tools/harvest_inats.py`` — the sole
+consumer of the original names CSV.
+"""
 from __future__ import annotations
 
 import csv
@@ -17,8 +26,6 @@ from .paths import (
 
 # --- Taxonomy names (tax_id -> family / species / name) -----------------------
 
-# Cache of the parsed names CSV, invalidated by the file's mtime.
-_NAMES_CACHE: dict = {"path": None, "mtime": None, "data": {}}
 _EMPTY_NAME_INFO = {
     "superfamily": "",
     "family": "",
@@ -28,17 +35,22 @@ _EMPTY_NAME_INFO = {
     "obs": "",
 }
 
+# Cache of the parsed names CSV (tools only), invalidated by mtime.
+_NAMES_CSV_CACHE: dict = {"path": None, "mtime": None, "data": {}}
+# Cache of lineage extracted from data_summary.json.
+_NAMES_CACHE: dict = {"path": None, "mtime": None, "data": {}}
+
 
 def get_names_csv_path() -> Path:
     """Return the configured path to the taxonomy names CSV."""
     return Path(settings.MOTHS_NAMES_CSV)
 
 
-def load_names() -> dict[str, dict]:
-    """Return ``{tax_id: {family, species, name}}`` parsed from the names CSV.
+def load_names_csv() -> dict[str, dict]:
+    """Return ``{tax_id: lineage}`` parsed from the names CSV.
 
-    The result is cached and only re-read when the file changes. A missing or
-    unreadable file yields an empty mapping (callers fall back to the raw id).
+    **Only** ``tools/harvest_inats.py`` should call this. Everything else uses
+    :func:`load_names` / ``data_summary.json``.
     """
     path = get_names_csv_path()
     key = str(path)
@@ -47,8 +59,8 @@ def load_names() -> dict[str, dict]:
     except OSError:
         mtime = None
 
-    if _NAMES_CACHE["path"] == key and _NAMES_CACHE["mtime"] == mtime:
-        return _NAMES_CACHE["data"]
+    if _NAMES_CSV_CACHE["path"] == key and _NAMES_CSV_CACHE["mtime"] == mtime:
+        return _NAMES_CSV_CACHE["data"]
 
     data: dict[str, dict] = {}
     if mtime is not None:
@@ -64,19 +76,57 @@ def load_names() -> dict[str, dict]:
                         "subfamily": (row.get("subfamily") or "").strip(),
                         "species": (row.get("species") or "").strip(),
                         "name": (row.get("name") or "").strip(),
-                        # iNaturalist observation count; kept out of the summary
-                        # cache so the CSV stays the single source of truth.
                         "obs": (row.get("obs") or "").strip(),
                     }
         except OSError:
             data = {}
+
+    _NAMES_CSV_CACHE.update(path=key, mtime=mtime, data=data)
+    return data
+
+
+def load_names() -> dict[str, dict]:
+    """Return ``{tax_id: lineage}`` from ``data_summary.json``.
+
+    Each value has ``superfamily``, ``family``, ``subfamily``, ``species``,
+    ``name``, and ``obs`` (iNat observation count when harvested). Missing or
+    stale summary → empty mapping.
+    """
+    # Local import avoids a cycle at module load (wiki does not import names).
+    from .wiki import get_data_summary_path, load_data_summary
+
+    path = get_data_summary_path()
+    key = str(path)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = None
+
+    if _NAMES_CACHE["path"] == key and _NAMES_CACHE["mtime"] == mtime:
+        return _NAMES_CACHE["data"]
+
+    data: dict[str, dict] = {}
+    summary = load_data_summary()
+    species = summary.get("species") if isinstance(summary, dict) else None
+    if isinstance(species, dict):
+        for tax_id, row in species.items():
+            if not isinstance(row, dict):
+                continue
+            data[str(tax_id)] = {
+                "superfamily": (row.get("superfamily") or "").strip(),
+                "family": (row.get("family") or "").strip(),
+                "subfamily": (row.get("subfamily") or "").strip(),
+                "species": (row.get("species") or "").strip(),
+                "name": (row.get("name") or "").strip(),
+                "obs": str(row.get("obs") or "").strip(),
+            }
 
     _NAMES_CACHE.update(path=key, mtime=mtime, data=data)
     return data
 
 
 def get_name_info(tax_id) -> dict:
-    """Return ``{family, species, name}`` for a tax_id (empty strings if unknown)."""
+    """Return lineage dict for a tax_id (empty strings if unknown)."""
     return load_names().get(str(tax_id), _EMPTY_NAME_INFO)
 
 

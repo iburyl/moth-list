@@ -79,7 +79,15 @@ from .utils import (
     verify_pose_row,
     boa_node_counts,
     boa_row_from_data,
+    flat_taxonomy_rows,
+    gbif_node_counts,
+    gbif_row_from_data,
+    inats_node_counts,
+    inats_row_from_data,
+    load_data_summary,
     load_species_data,
+    pnw_node_counts,
+    pnw_row_from_data,
     wiki_node_counts,
     wiki_row_from_summary,
 )
@@ -114,14 +122,30 @@ def index(request):
     return browse(request, lineage="")
 
 
+def flat_taxonomy(request):
+    """All species in taxonomic order with cross-source scientific-name cells."""
+    data = load_data_summary()
+    rows = flat_taxonomy_rows(data)
+    species_count = sum(1 for row in rows if row.get("kind") == "species")
+    return render(
+        request,
+        "moths/flat_taxonomy.html",
+        {
+            "rows": rows,
+            "species_count": species_count,
+            "missing": data is None,
+        },
+    )
+
+
 def _index_row(tax_id: str) -> dict:
     """Build one flat index-table row for a tax_id from its cached summary.
 
     Read-only: never builds here (that is the heavy path). A tax with no cached
     summary yet renders with "—" placeholders; its summary is built when the
-    species view is entered. Names/obs come straight from the (mtime-cached) names
-    CSV, so they show even before a summary exists. Reused by the legacy flat
-    index and by the genus-level browse page (its species listing).
+    species view is entered. Names/obs come from ``data_summary.json`` via
+    :func:`get_name_info`. Reused by the legacy flat index and by the
+    genus-level browse page (its species listing).
     """
     summary = load_summary(tax_id)
     name_info = get_name_info(tax_id)
@@ -145,6 +169,7 @@ def _index_row(tax_id: str) -> dict:
             "count": views_map.get(pose, 0) if has_summary else None,
         }
 
+    species_data = load_species_data(tax_id)
     return {
         "tax_id": tax_id,
         "superfamily": name_info.get("superfamily", ""),
@@ -160,9 +185,12 @@ def _index_row(tax_id: str) -> dict:
         "view_cells": [_view_cell(pose) for pose in VIEW_POSES],
         "no_stage": counts.get("no_stage", 0) if has_summary else None,
         "no_box": counts.get("no_box", 0) if has_summary else None,
-        # Wiki / BOA decoration from MOTHS_DATA_DIR (not the listing base).
-        "wiki": wiki_row_from_summary(load_wiki_summary(tax_id)),
-        "boa": boa_row_from_data(load_species_data(tax_id).get("boa")),
+        # Wiki / BOA / iNats / GBIF / PNW decoration from MOTHS_DATA_DIR.
+        "wiki": wiki_row_from_summary(load_wiki_summary(tax_id), tax_id),
+        "boa": boa_row_from_data(species_data.get("boa")),
+        "inats": inats_row_from_data(species_data.get("inats")),
+        "gbif": gbif_row_from_data(species_data.get("gbif")),
+        "pnw": pnw_row_from_data(species_data.get("pnw")),
     }
 
 
@@ -241,8 +269,8 @@ _BROWSE_COUNT_KEYS = (
 
 # Fields copied onto each taxon browse row for the table columns: next-level
 # total (want), species present-vs-expected (folders of want), the total image
-# count under the node, the hand-label gaps, and the summed iNaturalist
-# observation count.
+# count under the node, and the hand-label gaps. iNat observation totals come
+# from ``data/tax_summary.json`` (see :func:`inats_node_counts`), not labels.
 _BROWSE_ROW_KEYS = (
     "want",
     "species_want",
@@ -250,7 +278,6 @@ _BROWSE_ROW_KEYS = (
     "images",
     "no_stage",
     "no_box",
-    "obs",
 )
 
 
@@ -348,6 +375,9 @@ def browse(request, lineage=""):
             wiki_child = wiki_container.get(key) if wiki_container else None
             row["wiki"] = wiki_node_counts(wiki_child)
             row["boa"] = boa_node_counts(wiki_child)
+            row["obs"] = inats_node_counts(wiki_child)["observations"]
+            row["gbif"] = gbif_node_counts(wiki_child)
+            row["pnw"] = pnw_node_counts(wiki_child)
             children.append(row)
 
     crumbs = [{"label": "All", "url": reverse("moths:browse")}]
@@ -669,7 +699,7 @@ def _pose_row_sort_key(row):
 
 
 def _make_row(image, data, starred, is_adult, flags=(), class_from_prediction=False,
-              file_versions=None, box_from_prediction=False):
+              file_versions=None, box_from_prediction=False, needs_box=False):
     """Build a template row for one image from its cached pose ``data``.
 
     Any image with at least one computable metric (symmetry / pixels /
@@ -695,9 +725,12 @@ def _make_row(image, data, starred, is_adult, flags=(), class_from_prediction=Fa
     from prediction, no hand ``.class``) and ``review_box``
     (``box_from_prediction``: the box/keypoints come from prediction, no hand
     label yet) drive a blue "review stage" / "review box" / "review stage, box"
-    note. ``needs_rebuild`` (via :func:`pose_row_needs_rebuild`, using
+    note.     ``needs_rebuild`` (via :func:`pose_row_needs_rebuild`, using
     ``file_versions`` — the file-level ``metric_versions`` of the cache — to
-    judge staleness) drives an orange "rebuild" note. Neither draws a border.
+    judge staleness) drives an orange "rebuild" note. ``needs_box`` (computed by
+    the caller from the live label/prediction folders) drives a red "needs a
+    box" note: the image is normalizable (its flags don't suppress it) but has
+    no box or keypoints from either source yet. None of these draw a border.
 
     Both review hints are read from the *live* label folders (not the cached
     ``source``), so they clear as soon as a hand label exists — decoupled from
@@ -732,6 +765,7 @@ def _make_row(image, data, starred, is_adult, flags=(), class_from_prediction=Fa
         "is_top_down": is_adult and pose == POSE_TOP_DOWN and not no_norm,
         "review_stage": bool(class_from_prediction),
         "review_box": bool(box_from_prediction),
+        "needs_box": bool(needs_box),
         "needs_rebuild": pose_row_needs_rebuild(data, file_versions),
         "metric": symmetry,
         "sym_score": sym_score,
@@ -778,13 +812,21 @@ def _build_unified_groups(tax_id, image_list, cached):
         # Live box source (two cheap stats, cache-independent): the box comes
         # from prediction only while there's a prediction label and no hand
         # label yet, so "review box" clears the moment a hand box is drawn.
-        box_from_prediction = (
-            get_prediction_path(image.filename).is_file()
-            and not get_label_path(image.filename).is_file()
+        has_label = get_label_path(image.filename).is_file()
+        has_prediction = get_prediction_path(image.filename).is_file()
+        box_from_prediction = has_prediction and not has_label
+        # "Needs a box": the image could be normalized (its flags don't opt it
+        # out) but there is no box or keypoints from either source yet, so a
+        # human has to draw one before it can be cropped/normalized.
+        needs_box = (
+            not has_label
+            and not has_prediction
+            and not flags_suppress_normalization(flags)
         )
         row = _make_row(
             image, data, starred, stage == "Adult", flags,
             class_source == "prediction", file_versions, box_from_prediction,
+            needs_box,
         )
         for gid in _target_group_ids(stage, flags, pose):
             if gid in buckets:
@@ -814,8 +856,8 @@ def _build_unified_groups(tax_id, image_list, cached):
 def _tax_stub(request, tax_id, unknown):
     """Render the stub page for a taxon with nothing to show.
 
-    ``unknown`` distinguishes a tax_id absent from the names CSV (an unknown
-    taxon) from a known one that simply has no data on disk yet.
+    ``unknown`` distinguishes a tax_id absent from ``data_summary.json`` (an
+    unknown taxon) from a known one that simply has no data on disk yet.
     """
     info = get_name_info(tax_id)
     context = {
@@ -833,7 +875,7 @@ def species_view(request, tax_id):
     This view is a **pure read** — it never rebuilds a cache in the background.
     The states it distinguishes:
 
-    * ``tax_id`` not in the names CSV -> the "unknown taxon" stub.
+    * ``tax_id`` not in ``data_summary.json`` -> the "unknown taxon" stub.
     * known but with no observations *and* no summary yet -> the "no data" stub.
     * known with a summary but no observations -> the normal page's "no data".
     * known with observations but a missing/stale summary or pose cache -> the
@@ -849,9 +891,9 @@ def species_view(request, tax_id):
     Keypoint adults additionally show metrics and are score-sorted. Honors the
     stage/labeled filters.
     """
-    # Unknown from the CSV's perspective -> stub, regardless of any stray files.
-    # Guard on a non-empty index so a missing/unreadable names CSV degrades to
-    # the old behaviour instead of flagging every taxon as unknown.
+    # Unknown from data_summary's perspective -> stub, regardless of any stray
+    # files. Guard on a non-empty index so a missing summary degrades to the old
+    # behaviour instead of flagging every taxon as unknown.
     names = load_names()
     if names and str(tax_id) not in names:
         return _tax_stub(request, tax_id, unknown=True)
@@ -877,6 +919,7 @@ def species_view(request, tax_id):
 
     groups = _build_unified_groups(tax_id, filtered, cached)
 
+    species_data = load_species_data(tax_id)
     context = {
         "tax_id": tax_id,
         "groups": groups,
@@ -889,8 +932,11 @@ def species_view(request, tax_id):
         "filter_desc": _filter_desc(stage_filter, labeled_filter, pose_filter),
         "is_filtered": bool(stage_filter or labeled_filter or pose_filter),
         "filter_qs": request.GET.urlencode(),
-        # Optional Wikipedia / Speciesbox decoration from MOTHS_DATA_DIR.
-        "wiki": wiki_row_from_summary(load_wiki_summary(tax_id)),
+        "wiki": wiki_row_from_summary(load_wiki_summary(tax_id), tax_id),
+        "boa": boa_row_from_data(species_data.get("boa")),
+        "inats": inats_row_from_data(species_data.get("inats")),
+        "gbif": gbif_row_from_data(species_data.get("gbif")),
+        "pnw": pnw_row_from_data(species_data.get("pnw")),
     }
     return render(request, "moths/species_view.html", context)
 
@@ -1103,8 +1149,8 @@ def image_normalized(request, filename):
     quality_grade = observation.get("quality_grade")
 
     # Reference-circle geometry (as % of the crop) matching the pose's scaling:
-    # 90% for the vertical F→B layout, 80% for side view. The bounding-box
-    # layout has no reference circle (``circle_radius`` is ``None``).
+    # 80% for both pose layouts. The bounding-box layout has no reference circle
+    # (``circle_radius`` is ``None``).
     circle_radius = normalization.get("circle_radius")
     if circle_radius:
         circle_pct = circle_radius * 2 * 100

@@ -14,7 +14,7 @@ from .annotations import (
 
 
 # --- Wing-position statistics images -----------------------------------------
-# When a tax has more than WING_STATS_MIN usable poses, build_pose_data renders
+# When a tax has at least WING_STATS_MIN usable poses, build_pose_data renders
 # a scatter of every wing position with each pose aligned so the F/B midpoint
 # sits at the image centre and the F→B line runs along a centre axis. The scale
 # is data-driven: the farthest point (by x or y) is placed just inside the
@@ -24,7 +24,7 @@ from .annotations import (
 #   * side view: F→B along the horizontal centre line (F left, B right); the one
 #     visible wing is drawn, and R-views are mirrored across the F→B axis so they
 #     overlay the L-views (i.e. all wings land on the same side).
-WING_STATS_MIN = 10
+WING_STATS_MIN = 3
 WING_STATS_SIZE = 512
 WING_STATS_DOT_RADIUS = 4
 WING_STATS_ALPHA = 0.45
@@ -191,12 +191,12 @@ def _render_wing_scatter(out_path: Path, colored_points, f_norm: complex,
 def build_wing_stats(tax_id: str, per_image: dict) -> Path | None:
     """Render/refresh the top-down wing-position scatter PNG for a tax_id.
 
-    Needs more than :data:`WING_STATS_MIN` usable top-down poses; otherwise any
+    Needs at least :data:`WING_STATS_MIN` usable top-down poses; otherwise any
     stale image is deleted and ``None`` returned. Returns the PNG path on write.
     """
     points = list(_top_down_wing_points(per_image))
     out_path = get_wing_stats_path(tax_id)
-    if len(points) <= WING_STATS_MIN:
+    if len(points) < WING_STATS_MIN:
         _unlink_quiet(out_path)
         return None
     colored = []
@@ -209,12 +209,12 @@ def build_wing_stats(tax_id: str, per_image: dict) -> Path | None:
 def build_side_wing_stats(tax_id: str, per_image: dict) -> Path | None:
     """Render/refresh the side-view wing-position scatter PNG for a tax_id.
 
-    Needs more than :data:`WING_STATS_MIN` usable side poses; otherwise any
+    Needs at least :data:`WING_STATS_MIN` usable side poses; otherwise any
     stale image is deleted and ``None`` returned. Returns the PNG path on write.
     """
     points = list(_side_wing_points(per_image))
     out_path = get_side_wing_stats_path(tax_id)
-    if len(points) <= WING_STATS_MIN:
+    if len(points) < WING_STATS_MIN:
         _unlink_quiet(out_path)
         return None
     colored = [(w, WING_STATS_WING_COLOR) for w in points]

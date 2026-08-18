@@ -3,15 +3,12 @@
 """Parse the Butterflies of America dump into a single ``boa_summary.json``.
 
 Reads ``MOTHS_DATA_DIR/butterfliesofamerica.dump.html`` (download once with
-curl, e.g. ``curl -L -o …/butterfliesofamerica.dump.html
-https://butterfliesofamerica.com/L/All.htm``) and writes every species row
-found in the dump (not limited to the names CSV) to::
+curl) and writes **every** species row found in the dump to::
 
     MOTHS_DATA_DIR/boa_summary.json
 
-Each entry keeps only: scientific name, optional iNat tax_id, BOA page URL,
-subspecies count, and location note. Run ``tools/parse_data_summary.py``
-afterward to fold this into the CSV-scoped Django lookup files.
+Not scoped to iNat / CSV. Run ``tools/parse_data_summary.py`` afterward to
+match BOA rows onto the ``inats_summary`` universe.
 """
 
 from __future__ import annotations

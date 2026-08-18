@@ -1,8 +1,8 @@
 """Template helpers for showing tax_ids as friendly species names.
 
-``load_names`` maps each tax_id to its family/species/name (from the configured
-names CSV). Wherever a tax_id is shown we display the species text, with the
-full ``{name} ({id})`` available on hover.
+``get_name_info`` reads lineage from ``data_summary.json``. Wherever a tax_id
+is shown we display the species text, with the full ``{name} ({id})`` available
+on hover.
 """
 
 from django import template

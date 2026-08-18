@@ -1,0 +1,154 @@
+{% extends "moths/base.html" %}
+
+{% block title %}Flat taxonomy — Moth List{% endblock %}
+
+{% block content %}
+<style>
+    table.flat-tax {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 0.9rem;
+    }
+    table.flat-tax th, table.flat-tax td {
+        padding: 0.35rem 0.75rem;
+        border-bottom: 1px solid #8882;
+        text-align: left;
+        vertical-align: top;
+    }
+    table.flat-tax thead th {
+        border-bottom: 2px solid #8884;
+        font-size: 0.85rem;
+        color: #6b7280;
+        white-space: nowrap;
+    }
+    table.flat-tax th.col-group,
+    table.flat-tax td.col-group { border-left: 1px solid #8883; }
+    table.flat-tax tbody tr.species:hover { background: #8881; }
+    table.flat-tax tr.rank-header td {
+        padding-top: 0.85rem;
+        font-weight: 600;
+        background: #8881;
+        border-bottom: 1px solid #8884;
+    }
+    table.flat-tax .unknown { color: #9ca3af; }
+    table.flat-tax a.same,
+    table.flat-tax .same { color: #16a34a; }
+    table.flat-tax td.species-col a { font-weight: 500; font-style: italic; }
+</style>
+
+<h2 class="tax-heading">Flat taxonomy</h2>
+{% if missing %}
+    <p class="muted">
+        <code>data_summary.json</code> is missing or stale. Run
+        <code>tools/parse_data_summary.py</code> first.
+    </p>
+{% else %}
+    <p class="muted">{{ species_count }} species — sorted by superfamily, family, subfamily, species.</p>
+    <table class="flat-tax">
+        <thead>
+            <tr>
+                <th title="Species in this list (opens species view)">species</th>
+                <th class="col-group" title="iNaturalist scientific name">from iNats</th>
+                <th class="col-group" title="Wikipedia scientific name">from wiki</th>
+                <th class="col-group" title="Butterflies of America scientific name">from boa</th>
+                <th class="col-group" title="Pacific Northwest Moths scientific name">from PNW</th>
+                <th class="col-group" title="GBIF accepted scientific name">from GBIF</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+                {% if row.kind == "header" %}
+                    <tr class="rank-header">
+                        <td colspan="6">{{ row.label }}</td>
+                    </tr>
+                {% else %}
+                    <tr class="species">
+                        <td class="species-col">
+                            {% if row.species %}
+                                <a href="{% url 'moths:species_view' row.tax_id %}" title="{{ row.tax_id }}">{{ row.species }}</a>
+                            {% else %}
+                                <a href="{% url 'moths:species_view' row.tax_id %}">{{ row.tax_id }}</a>
+                            {% endif %}
+                        </td>
+                        <td class="col-group">
+                            {% if row.inats.kind == "unknown" %}
+                                <span class="unknown">—</span>
+                            {% elif row.inats.kind == "same" %}
+                                {% if row.inats.url %}
+                                    <a class="same" href="{{ row.inats.url }}" target="_blank" rel="noopener" title="{{ row.inats.tooltip }}">same</a>
+                                {% else %}
+                                    <span class="same">same</span>
+                                {% endif %}
+                            {% elif row.inats.url %}
+                                <a href="{{ row.inats.url }}" target="_blank" rel="noopener" title="{{ row.inats.tooltip }}">{{ row.inats.text }}</a>
+                            {% else %}
+                                {{ row.inats.text }}
+                            {% endif %}
+                        </td>
+                        <td class="col-group">
+                            {% if row.wiki.kind == "unknown" %}
+                                <span class="unknown">—</span>
+                            {% elif row.wiki.kind == "same" %}
+                                {% if row.wiki.url %}
+                                    <a class="same" href="{{ row.wiki.url }}" target="_blank" rel="noopener" title="{{ row.wiki.tooltip }}">same</a>
+                                {% else %}
+                                    <span class="same">same</span>
+                                {% endif %}
+                            {% elif row.wiki.url %}
+                                <a href="{{ row.wiki.url }}" target="_blank" rel="noopener" title="{{ row.wiki.tooltip }}">{{ row.wiki.text }}</a>
+                            {% else %}
+                                {{ row.wiki.text }}
+                            {% endif %}
+                        </td>
+                        <td class="col-group">
+                            {% if row.boa.kind == "unknown" %}
+                                <span class="unknown">—</span>
+                            {% elif row.boa.kind == "same" %}
+                                {% if row.boa.url %}
+                                    <a class="same" href="{{ row.boa.url }}" target="_blank" rel="noopener" title="{{ row.boa.tooltip }}">same</a>
+                                {% else %}
+                                    <span class="same">same</span>
+                                {% endif %}
+                            {% elif row.boa.url %}
+                                <a href="{{ row.boa.url }}" target="_blank" rel="noopener" title="{{ row.boa.tooltip }}">{{ row.boa.text }}</a>
+                            {% else %}
+                                {{ row.boa.text }}
+                            {% endif %}
+                        </td>
+                        <td class="col-group">
+                            {% if row.pnw.kind == "unknown" %}
+                                <span class="unknown">—</span>
+                            {% elif row.pnw.kind == "same" %}
+                                {% if row.pnw.url %}
+                                    <a class="same" href="{{ row.pnw.url }}" target="_blank" rel="noopener" title="{{ row.pnw.tooltip }}">same</a>
+                                {% else %}
+                                    <span class="same">same</span>
+                                {% endif %}
+                            {% elif row.pnw.url %}
+                                <a href="{{ row.pnw.url }}" target="_blank" rel="noopener" title="{{ row.pnw.tooltip }}">{{ row.pnw.text }}</a>
+                            {% else %}
+                                {{ row.pnw.text }}
+                            {% endif %}
+                        </td>
+                        <td class="col-group">
+                            {% if row.gbif.kind == "unknown" %}
+                                <span class="unknown">—</span>
+                            {% elif row.gbif.kind == "same" %}
+                                {% if row.gbif.url %}
+                                    <a class="same" href="{{ row.gbif.url }}" target="_blank" rel="noopener" title="{{ row.gbif.tooltip }}">same</a>
+                                {% else %}
+                                    <span class="same">same</span>
+                                {% endif %}
+                            {% elif row.gbif.url %}
+                                <a href="{{ row.gbif.url }}" target="_blank" rel="noopener" title="{{ row.gbif.tooltip }}">{{ row.gbif.text }}</a>
+                            {% else %}
+                                {{ row.gbif.text }}
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endif %}
+            {% endfor %}
+        </tbody>
+    </table>
+{% endif %}
+{% endblock %}

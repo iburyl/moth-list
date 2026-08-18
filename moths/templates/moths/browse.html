@@ -83,7 +83,9 @@
                     <th rowspan="2"{% if next_level == "species" %} class="col-group"{% endif %} title="Species with an image folder on disk, of species expected">species</th>
                     <th class="group col-group" colspan="1" title="Wikipedia Speciesbox coverage under this group">from wiki</th>
                     <th class="group col-group" colspan="1" title="Butterflies of America coverage under this group">from boa</th>
-                    <th class="group col-group" colspan="1" title="iNaturalist data from the names CSV">from iNats</th>
+                    <th class="group col-group" colspan="1" title="Pacific Northwest Moths coverage under this group">from PNW</th>
+                    <th class="group col-group" colspan="1" title="iNaturalist data from data_summary">from iNats</th>
+                    <th class="group col-group" colspan="2" title="GBIF backbone match and occurrence totals under this group">from GBIF</th>
                     <th rowspan="2" class="col-group" title="Total images under this category">images</th>
                     {% if can_edit %}
                     <th class="group col-group" colspan="2" title="Hand-label gaps still to review">to review</th>
@@ -92,7 +94,10 @@
                 <tr>
                     <th class="col-group" title="Species with a downloaded Wikipedia article">articles</th>
                     <th class="col-group" title="Species with a Butterflies of America page">species</th>
-                    <th class="col-group" title="Total iNaturalist observations (from the names CSV)">obs</th>
+                    <th class="col-group" title="Species with a Pacific Northwest Moths page">species</th>
+                    <th class="col-group" title="Total iNaturalist observations (from data/tax_summary.json)">obs</th>
+                    <th class="col-group" title="Species matched in GBIF">species</th>
+                    <th title="Total GBIF PRESENT occurrences under matched species">obs</th>
                     {% if can_edit %}
                     <th class="col-group" title="Images with no hand stage label">stage</th>
                     <th title="Images with no hand box label">box</th>
@@ -114,9 +119,12 @@
                             <td class="col-group">{{ row.want }}</td>
                         {% endif %}
                         <td{% if next_level == "species" %} class="col-group"{% endif %}>{% if row.species_have_folder == row.species_want %}{{ row.species_have_folder }}{% else %}{{ row.species_have_folder }} of {{ row.species_want }}{% endif %}</td>
-                        <td class="col-group">{% if row.wiki.articles %}{{ row.wiki.articles }}{% else %}<span class="num-zero">0</span>{% endif %}</td>
+                        <td class="col-group"{% if row.wiki.articles_tooltip %} title="{{ row.wiki.articles_tooltip }}"{% endif %}>{% if row.wiki.articles %}{{ row.wiki.articles }}{% else %}<span class="num-zero">0</span>{% endif %}</td>
                         <td class="col-group">{% if row.boa.species %}{{ row.boa.species }}{% else %}<span class="num-zero">0</span>{% endif %}</td>
+                        <td class="col-group">{% if row.pnw.species %}{{ row.pnw.species }}{% else %}<span class="num-zero">0</span>{% endif %}</td>
                         <td class="col-group">{% if row.obs %}{{ row.obs }}{% else %}<span class="num-zero">—</span>{% endif %}</td>
+                        <td class="col-group"{% if row.gbif.species_tooltip %} title="{{ row.gbif.species_tooltip }}"{% endif %}>{% if row.gbif.species %}{{ row.gbif.species }}{% else %}<span class="num-zero">0</span>{% endif %}</td>
+                        <td>{% if row.gbif.observations %}{{ row.gbif.observations }}{% else %}<span class="num-zero">—</span>{% endif %}</td>
                         <td class="col-group">{% if row.images %}{{ row.images }}{% else %}<span class="num-zero">0</span>{% endif %}</td>
                         {% if can_edit %}
                         <td class="col-group">{% if row.no_stage %}{{ row.no_stage }}{% else %}<span class="num-zero">0</span>{% endif %}</td>

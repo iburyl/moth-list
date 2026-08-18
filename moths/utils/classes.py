@@ -46,7 +46,8 @@ FLAG_TABLE: tuple[Flag, ...] = (
     Flag("Pinned", stages=("Adult",)),
     Flag("Macro", stages=("Adult",)),
     Flag("Damaged", train=False),
-    Flag("Traces", train=False, stages=("Larva",)),
+    Flag("Traces", train=False, stages=("Larva", "Pupa")),
+    Flag("Web", train=False, stages=("Larva", "Pupa")),
     Flag("Mating", normalize=False, train=False, stages=("Adult",)),
 )
 

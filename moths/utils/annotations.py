@@ -1,6 +1,7 @@
 """YOLO label/pose/prediction parsing, loading and pose classification."""
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -148,6 +149,16 @@ POSE_BOTTOM_UP = "bottom_up"
 POSE_UNCLEAR = "unclear"
 POSE_NONE = "none"
 
+# When both wings fall on the same side of F→B, still accept top_down /
+# bottom_up if each wing's F→wing ray is within this many degrees of F→B
+# (tips nearly collapsed onto the body axis, e.g. Plutella xylostella).
+_SAME_SIDE_AXIS_DEG = 5.0
+
+
+def _signed_angle_deg(ax: float, ay: float, bx: float, by: float) -> float:
+    """Signed angle in degrees from vector A to vector B (image y-down)."""
+    return math.degrees(math.atan2(ax * by - ay * bx, ax * bx + ay * by))
+
 
 def get_pose_dir() -> Path:
     """Directory holding the YOLO-pose files used for pose classification.
@@ -293,8 +304,11 @@ def classify_annotation(annotation: Annotation) -> str:
       (2), the other absent (0)
     * ``unclear``  – neither wing is fully visible (2)
     * otherwise the F→B line splits the plane and the side L/R fall on decides:
-      ``top_down`` (L left of F→B, R right), ``bottom_up`` (swapped); if both
-      wings land on the same side (or on the line) it is ``unclear``.
+      ``top_down`` / ``bottom_up`` when the wings are on opposite sides; if both
+      wings land on the same side (or on the line), still accept a pose when
+      each F→wing ray is within ``_SAME_SIDE_AXIS_DEG`` of F→B (collapsed tips)
+      and the signed F→L→F→R angle picks bottom_up (positive) or top_down;
+      otherwise ``unclear``.
 
     Side of the F→B line uses cross((B-F), (P-F)); with image coords (y down),
     a point left of the F→B heading has a negative cross.
@@ -318,19 +332,32 @@ def classify_annotation(annotation: Annotation) -> str:
     if (lv == 2 and rv == 0) or (lv == 0 and rv == 2):
         return POSE_SIDE
 
-    # Both wings present (at least one fully visible): original geometry.
-    def side(point: Keypoint) -> float:
+    # Both wings fully visible.
+    def side_of_fb(point: Keypoint) -> float:
         return (back.x - front.x) * (point.y - front.y) - (
             back.y - front.y
         ) * (point.x - front.x)
 
-    cl, cr = side(left), side(right)
+    cl, cr = side_of_fb(left), side_of_fb(right)
     if cl < 0 and cr > 0:
         return POSE_BOTTOM_UP
     if cl > 0 and cr < 0:
         return POSE_TOP_DOWN
-    # Both wings on the same side of F→B (or on the line): ambiguous.
-    return POSE_UNCLEAR
+
+    # Both wings on the same side of F→B (or on the line). If each tip sits
+    # nearly on the body axis, recover top_down / bottom_up from the F→L / F→R
+    # winding; otherwise leave unclear.
+    fbx, fby = back.x - front.x, back.y - front.y
+    flx, fly = left.x - front.x, left.y - front.y
+    frx, fry = right.x - front.x, right.y - front.y
+    l_angle = _signed_angle_deg(fbx, fby, flx, fly)
+    r_angle = _signed_angle_deg(fbx, fby, frx, fry)
+    if abs(l_angle) > _SAME_SIDE_AXIS_DEG or abs(r_angle) > _SAME_SIDE_AXIS_DEG:
+        return POSE_UNCLEAR
+    lr_angle = _signed_angle_deg(flx, fly, frx, fry)
+    if lr_angle > 0:
+        return POSE_BOTTOM_UP
+    return POSE_TOP_DOWN
 
 
 def classify_pose(image_filename: str) -> str:

@@ -84,6 +84,7 @@
                        aria-label="Search taxa">
                 <ul class="tax-search-list" id="tax-search-list" hidden></ul>
             </div>
+            <a class="header-btn" href="{% url 'moths:flat_taxonomy' %}">flat</a>
             <a class="header-btn" href="{% url 'moths:observation_lookup' %}">id</a>
             {% if request.user.is_authenticated %}
                 <span class="muted" title="Signed in">{{ request.user.get_username }}</span>

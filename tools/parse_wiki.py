@@ -3,13 +3,25 @@
 """Parse harvested Wikipedia articles into a single ``wiki_summary.json``.
 
 Reads every ``MOTHS_DATA_DIR/<tax_id>/<tax_id>.wiki`` file (from
-``harvest_wiki.py``), regardless of the names CSV, and writes::
+``harvest_wiki.py``) — only taxa that were harvested — and writes::
 
     MOTHS_DATA_DIR/wiki_summary.json
 
-Each entry holds only the Speciesbox fields the app cares about: scientific
-name, authority, IUCN, and TNC/NatureServe. Run ``tools/parse_data_summary.py``
-afterward to fold this into the CSV-scoped Django lookup files.
+Each entry holds taxobox fields plus an ``article_kind`` classification
+against the iNat main name / synonyms (from ``inats_summary.json`` and
+``inats_synonyms_summary.json``):
+
+* ``matches_name`` — Speciesbox taxon matches iNat main name
+* ``known_synonym`` — Speciesbox taxon matches a known iNat synonym
+* ``unknown_synonym`` — Speciesbox present, name matches neither
+* ``higher_rank`` — no Speciesbox, but ``{{Automatic taxobox`` is present
+* ``unknown_type`` — harvested article with neither template
+
+Also stores ``have_speciesbox``, ``have_automatic_taxobox``,
+``name_matches_inats``, scientific name, authority, IUCN, and TNC.
+
+Run ``tools/parse_data_summary.py`` afterward to fold this into the
+inats-scoped Django lookup files.
 """
 
 from __future__ import annotations
@@ -25,8 +37,16 @@ from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-WIKI_SUMMARY_VERSION = 1
+WIKI_SUMMARY_VERSION = 2
 WIKI_SUMMARY_NAME = "wiki_summary.json"
+INATS_SUMMARY_NAME = "inats_summary.json"
+INATS_SYNONYMS_SUMMARY_NAME = "inats_synonyms_summary.json"
+
+ARTICLE_KIND_MATCHES_NAME = "matches_name"
+ARTICLE_KIND_KNOWN_SYNONYM = "known_synonym"
+ARTICLE_KIND_UNKNOWN_SYNONYM = "unknown_synonym"
+ARTICLE_KIND_HIGHER_RANK = "higher_rank"
+ARTICLE_KIND_UNKNOWN_TYPE = "unknown_type"
 
 _WIKILINK_RE = re.compile(r"\[\[([^\]|]*)\|([^\]]+)\]\]|\[\[([^\]]+)\]\]")
 _REF_RE = re.compile(r"<ref\b[^>]*/\s*>|<ref\b[^>]*>.*?</ref>", re.IGNORECASE | re.DOTALL)
@@ -76,7 +96,11 @@ def parse_args() -> argparse.Namespace:
     ).parse_args()
 
 
-# --- Speciesbox parsing ------------------------------------------------------
+def normalize_name(name: str) -> str:
+    return _WS_RE.sub(" ", (name or "").strip().casefold())
+
+
+# --- Speciesbox / taxobox parsing --------------------------------------------
 
 
 def _find_matching_braces(text: str, open_idx: int) -> int | None:
@@ -99,15 +123,18 @@ def _find_matching_braces(text: str, open_idx: int) -> int | None:
     return None
 
 
-def find_template(wikitext: str, name: str) -> str | None:
-    pattern = re.compile(rf"\{{\{{\s*({re.escape(name)})\b", re.IGNORECASE)
-    match = pattern.search(wikitext)
-    if not match:
-        return None
-    end = _find_matching_braces(wikitext, match.start())
-    if end is None:
-        return None
-    return wikitext[match.start() : end]
+def find_template(wikitext: str, *names: str) -> str | None:
+    """Return the first matching ``{{Name ...}}`` template, or ``None``."""
+    for name in names:
+        pattern = re.compile(rf"\{{\{{\s*({re.escape(name)})\b", re.IGNORECASE)
+        match = pattern.search(wikitext)
+        if not match:
+            continue
+        end = _find_matching_braces(wikitext, match.start())
+        if end is None:
+            continue
+        return wikitext[match.start() : end]
+    return None
 
 
 def parse_template_params(template: str) -> dict[str, str]:
@@ -340,14 +367,9 @@ def extract_status_block(
     }
 
 
-def parse_speciesbox(wikitext: str) -> dict[str, Any] | None:
-    template = find_template(wikitext, "Speciesbox")
-    if template is None:
-        return None
-    params = parse_template_params(template)
-    sci = scientific_name_from_params(params)
-    authority = short_authority(params.get("authority"))
-
+def extract_status_fields(
+    params: dict[str, str], sci_name: str
+) -> tuple[dict | None, dict | None]:
     iucn = None
     tnc = None
     for status_key, system_key, ref_key in (
@@ -359,7 +381,7 @@ def parse_speciesbox(wikitext: str) -> dict[str, Any] | None:
             status_key=status_key,
             system_key=system_key,
             ref_key=ref_key,
-            sci_name=sci,
+            sci_name=sci_name,
         )
         if block is None:
             continue
@@ -378,11 +400,139 @@ def parse_speciesbox(wikitext: str) -> dict[str, Any] | None:
                 "id": block["id"],
                 "url": block["url"],
             }
+    return iucn, tnc
 
+
+def parse_speciesbox(wikitext: str) -> dict[str, Any] | None:
+    template = find_template(wikitext, "Speciesbox", "Species box")
+    if template is None:
+        return None
+    params = parse_template_params(template)
+    sci = scientific_name_from_params(params)
+    authority = short_authority(params.get("authority"))
+    iucn, tnc = extract_status_fields(params, sci)
     return {
         "scientific_name": sci,
         "authority": authority,
         "have_speciesbox": True,
+        "iucn": iucn,
+        "tnc": tnc,
+    }
+
+
+def has_automatic_taxobox(wikitext: str) -> bool:
+    return find_template(wikitext, "Automatic taxobox") is not None
+
+
+def load_inat_name_index(data_dir: Path) -> dict[str, dict[str, Any]]:
+    """Return ``{tax_id: {main, synonyms: set[str]}}`` (normalized names)."""
+    out: dict[str, dict[str, Any]] = {}
+    summary = None
+    syn_summary = None
+    try:
+        summary = json.loads((data_dir / INATS_SUMMARY_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        summary = None
+    try:
+        syn_summary = json.loads(
+            (data_dir / INATS_SYNONYMS_SUMMARY_NAME).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError, json.JSONDecodeError):
+        syn_summary = None
+
+    by_tax = summary.get("by_tax_id") if isinstance(summary, dict) else None
+    if isinstance(by_tax, dict):
+        for tax_id, entry in by_tax.items():
+            if not isinstance(entry, dict):
+                continue
+            main = normalize_name(entry.get("name") or "")
+            out[str(tax_id)] = {"main": main, "synonyms": set()}
+
+    syn_by_tax = syn_summary.get("by_tax_id") if isinstance(syn_summary, dict) else None
+    if isinstance(syn_by_tax, dict):
+        for tax_id, entry in syn_by_tax.items():
+            if not isinstance(entry, dict):
+                continue
+            bucket = out.setdefault(str(tax_id), {"main": "", "synonyms": set()})
+            current = normalize_name(entry.get("current_name") or "")
+            if current and not bucket["main"]:
+                bucket["main"] = current
+            for name in entry.get("synonyms") or []:
+                key = normalize_name(name)
+                if key and key != bucket["main"]:
+                    bucket["synonyms"].add(key)
+    return out
+
+
+def classify_article(
+    *,
+    have_speciesbox: bool,
+    have_automatic_taxobox: bool,
+    scientific_name: str,
+    inat_main: str,
+    inat_synonyms: set[str],
+) -> tuple[str, bool | None]:
+    """Return ``(article_kind, name_matches_inats)``."""
+    if have_speciesbox:
+        sci_key = normalize_name(scientific_name)
+        if sci_key and inat_main and sci_key == inat_main:
+            return ARTICLE_KIND_MATCHES_NAME, True
+        if sci_key and sci_key in inat_synonyms:
+            return ARTICLE_KIND_KNOWN_SYNONYM, False
+        return ARTICLE_KIND_UNKNOWN_SYNONYM, False if sci_key else None
+    if have_automatic_taxobox:
+        return ARTICLE_KIND_HIGHER_RANK, None
+    return ARTICLE_KIND_UNKNOWN_TYPE, None
+
+
+def parse_wiki_article(
+    wikitext: str,
+    *,
+    inat_main: str = "",
+    inat_synonyms: set[str] | None = None,
+) -> dict[str, Any]:
+    """Parse one harvested article into a wiki_summary species entry."""
+    synonyms = inat_synonyms or set()
+    if not wikitext.strip():
+        kind, matches = classify_article(
+            have_speciesbox=False,
+            have_automatic_taxobox=False,
+            scientific_name="",
+            inat_main=inat_main,
+            inat_synonyms=synonyms,
+        )
+        return {
+            "scientific_name": "",
+            "authority": "",
+            "have_speciesbox": False,
+            "have_automatic_taxobox": False,
+            "name_matches_inats": matches,
+            "article_kind": kind,
+            "iucn": None,
+            "tnc": None,
+        }
+
+    speciesbox = parse_speciesbox(wikitext)
+    have_speciesbox = speciesbox is not None
+    have_auto = False if have_speciesbox else has_automatic_taxobox(wikitext)
+    sci = (speciesbox or {}).get("scientific_name") or ""
+    authority = (speciesbox or {}).get("authority") or ""
+    iucn = (speciesbox or {}).get("iucn")
+    tnc = (speciesbox or {}).get("tnc")
+    kind, matches = classify_article(
+        have_speciesbox=have_speciesbox,
+        have_automatic_taxobox=have_auto,
+        scientific_name=sci,
+        inat_main=inat_main,
+        inat_synonyms=synonyms,
+    )
+    return {
+        "scientific_name": sci,
+        "authority": authority,
+        "have_speciesbox": have_speciesbox,
+        "have_automatic_taxobox": have_auto,
+        "name_matches_inats": matches,
+        "article_kind": kind,
         "iucn": iucn,
         "tnc": tnc,
     }
@@ -407,33 +557,56 @@ def main() -> int:
     data_dir = Path(settings.MOTHS_DATA_DIR)
     data_dir.mkdir(parents=True, exist_ok=True)
 
+    name_index = load_inat_name_index(data_dir)
+    wiki_files = list(iter_wiki_files(data_dir))
+    total = len(wiki_files)
     species: dict[str, dict] = {}
-    counts = {"articles": 0, "speciesbox": 0, "iucn": 0, "tnc": 0}
+    counts = {
+        "articles": 0,
+        "speciesbox": 0,
+        "automatic_taxobox": 0,
+        "matches_name": 0,
+        "known_synonym": 0,
+        "unknown_synonym": 0,
+        "higher_rank": 0,
+        "unknown_type": 0,
+        "iucn": 0,
+        "tnc": 0,
+    }
 
-    for tax_id, path in iter_wiki_files(data_dir):
+    if total == 0:
+        print("No harvested *.wiki files found.")
+    else:
+        print(f"Parsing {total} Wikipedia articles…")
+
+    for index, (tax_id, path) in enumerate(wiki_files, start=1):
+        print(f"\r[{index} of {total}] {tax_id} ", end="", flush=True)
         try:
             wikitext = path.read_text(encoding="utf-8")
         except OSError as exc:
-            print(f"  ERROR {tax_id}: {exc}", file=sys.stderr)
+            print(f"\n  ERROR {tax_id}: {exc}", file=sys.stderr)
             continue
         counts["articles"] += 1
-        parsed = parse_speciesbox(wikitext) if wikitext.strip() else None
-        if parsed is None:
-            entry = {
-                "scientific_name": "",
-                "authority": "",
-                "have_speciesbox": False,
-                "iucn": None,
-                "tnc": None,
-            }
-        else:
-            entry = parsed
-            counts["speciesbox"] += 1
-            if entry.get("iucn"):
-                counts["iucn"] += 1
-            if entry.get("tnc"):
-                counts["tnc"] += 1
+        names = name_index.get(tax_id) or {"main": "", "synonyms": set()}
+        entry = parse_wiki_article(
+            wikitext,
+            inat_main=names["main"],
+            inat_synonyms=names["synonyms"],
+        )
         species[tax_id] = entry
+        kind = entry["article_kind"]
+        counts[kind] = counts.get(kind, 0) + 1
+        if entry.get("have_speciesbox"):
+            counts["speciesbox"] += 1
+        if entry.get("have_automatic_taxobox"):
+            counts["automatic_taxobox"] += 1
+        if entry.get("iucn"):
+            counts["iucn"] += 1
+        if entry.get("tnc"):
+            counts["tnc"] += 1
+
+    if total:
+        print()
 
     payload = {
         "version": WIKI_SUMMARY_VERSION,
@@ -447,6 +620,12 @@ def main() -> int:
     print(
         f"Wrote {out}: articles={counts['articles']} "
         f"speciesbox={counts['speciesbox']} "
+        f"automatic_taxobox={counts['automatic_taxobox']} "
+        f"matches_name={counts['matches_name']} "
+        f"known_synonym={counts['known_synonym']} "
+        f"unknown_synonym={counts['unknown_synonym']} "
+        f"higher_rank={counts['higher_rank']} "
+        f"unknown_type={counts['unknown_type']} "
         f"iucn={counts['iucn']} tnc={counts['tnc']}"
     )
     return 0

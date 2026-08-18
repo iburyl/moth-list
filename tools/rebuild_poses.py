@@ -15,7 +15,7 @@ After the per-tax pass it also rebuilds the single hierarchical aggregate::
 
     labels/tax_summary.json          (superfamily->...->species coverage counts)
 
-from the names CSV plus every per-tax summary on disk (a complete rebuild,
+from ``data_summary.json`` plus every per-tax summary on disk (a complete rebuild,
 independent of which tax_ids were refreshed above).
 
 It reuses the app's own logic (``moths.utils``) so the results match exactly
@@ -235,8 +235,8 @@ def main() -> int:
             wall = time.perf_counter() - wall_start
             print(_timing_line(index, total, tax_id, len(images), timer, wall))
 
-    # Complete rebuild of the hierarchical taxonomy aggregate from the names CSV
-    # + all per-tax summaries (regardless of which tax_ids were rebuilt above).
+    # Complete rebuild of the hierarchical taxonomy aggregate from
+    # data_summary.json + all per-tax summaries.
     tree_start = time.perf_counter()
     tree = moth_utils.build_tax_summary()
     print(

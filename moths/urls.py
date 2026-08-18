@@ -9,6 +9,7 @@ urlpatterns = [
     path("search/", views.taxon_search, name="taxon_search"),
     path("browse/", views.browse, name="browse"),
     path("browse/<path:lineage>/", views.browse, name="browse"),
+    path("flat/", views.flat_taxonomy, name="flat_taxonomy"),
     path("observation/", views.observation_lookup, name="observation_lookup"),
     path(
         "observation/species/<str:tax_id>/",

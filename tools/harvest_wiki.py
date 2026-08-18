@@ -1,50 +1,47 @@
 #!/usr/bin/env python3
 
-"""Harvest Wikipedia article source (wikitext) for every species in the names CSV.
+"""Harvest Wikipedia article source (wikitext) for found iNat species.
 
-Reads the taxonomy names CSV configured via Django (``TAX_CSV`` /
-``MOTHS_NAMES_CSV``) and, for each ``tax_id``, looks up the Wikipedia page
-whose title is the CSV ``species`` value (scientific name). The raw wikitext
-is written to::
+Reads ``inats_summary.json`` (found taxa only) and, for each tax_id, looks up
+a Wikipedia page by scientific name — first the current iNat ``name``, then
+each synonym from ``inats_synonyms_summary.json``. Ignores any
+``wikipedia_url`` on the iNat record. Stops at the first hit.
+
+Writes::
 
     <MOTHS_DATA_DIR>/<tax_id>/<tax_id>.wiki
+    <MOTHS_DATA_DIR>/wiki_list.json
 
-If no matching page exists (or the species cell is empty), the script still
-creates an empty ``<tax_id>/`` folder and leaves no ``.wiki`` file — that empty
-folder is the durable "not found" marker.
+``wiki_list.json`` records each successful fetch as
+``{id, queried, title, url}`` — iNat tax id, the name that hit, the
+canonical page title after redirects, and the article URL.
 
-Directories come from Django, exactly like the other tools in this folder: the
-environment must set every ``MOTHS_*`` path (including the new
-``MOTHS_DATA_DIR``). Re-runs skip tax_ids that already have a ``.wiki`` file, or
-an empty folder (previously missing), unless ``--force`` is passed.
+If no page is found, creates an empty ``<tax_id>/`` folder (miss marker) and
+leaves no ``.wiki`` file. Re-runs skip existing hits/misses unless ``--force-rerun``.
 
-Press SPACE between taxa for a clean stop (current request finishes; no later
-taxon is started).
+Press SPACE between taxa for a clean stop.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
+from urllib.parse import quote
 
 import requests
 
-# --- Repo / Django bootstrap -------------------------------------------------
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Wikimedia requires a descriptive User-Agent that identifies the client and a
-# way to contact the operator
-# (https://foundation.wikimedia.org/wiki/Policy:Wikimedia_Foundation_User-Agent_Policy).
-# Override the contact with MOTHS_WIKI_CONTACT (email or URL).
 _WIKI_CONTACT = (
     os.environ.get("MOTHS_WIKI_CONTACT")
     or os.environ.get("WIKI_CONTACT")
-    or "https://github.com/iburyl/moth-list"
+    or "https://github.com/iburylov/moth-list"
 )
 USER_AGENT = (
     f"moth-list-harvest-wiki/1.0 "
@@ -52,12 +49,13 @@ USER_AGENT = (
     f"python-requests/{requests.__version__}"
 )
 API_PATH = "/w/api.php"
-# Cap how long we wait on a single 429, and how many times we retry one title.
 MAX_RETRY_AFTER_SECONDS = 300.0
 MAX_RATE_LIMIT_RETRIES = 8
 
-
-# --- Clean-stop watcher (same idea as harvest_top_images.py) -----------------
+INATS_SUMMARY_NAME = "inats_summary.json"
+INATS_SYNONYMS_SUMMARY_NAME = "inats_synonyms_summary.json"
+WIKI_LIST_NAME = "wiki_list.json"
+WIKI_LIST_VERSION = 1
 
 
 class SpaceStopWatcher:
@@ -78,7 +76,7 @@ class SpaceStopWatcher:
         if not sys.stdin or not sys.stdin.isatty():
             return
         try:
-            import msvcrt  # noqa: F401  (Windows only)
+            import msvcrt  # noqa: F401
 
             target = self._run_windows
         except ImportError:
@@ -141,29 +139,23 @@ class SpaceStopWatcher:
                 return
 
 
-# --- Django -----------------------------------------------------------------
-
-
 def bootstrap_django():
-    """Set up Django and return ``(settings, load_names)``."""
     sys.path.insert(0, str(REPO_ROOT))
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "moths_list.settings")
 
     import django
 
     django.setup()
-
     from django.conf import settings
-    from moths.utils.names import load_names
 
-    return settings, load_names
+    return settings
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Fetch Wikipedia wikitext for every species in the names CSV and "
-            "store it under MOTHS_DATA_DIR/<tax_id>/<tax_id>.wiki."
+            "Fetch Wikipedia wikitext for found taxa in inats_summary.json "
+            "(try current name, then synonyms)."
         )
     )
     parser.add_argument(
@@ -172,7 +164,7 @@ def parse_args() -> argparse.Namespace:
         help="Wikipedia language subdomain (default: en).",
     )
     parser.add_argument(
-        "--force",
+        "--force-rerun",
         action="store_true",
         help=(
             "Re-fetch even when <tax_id>.wiki already exists or the empty "
@@ -194,24 +186,18 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# --- Wikipedia --------------------------------------------------------------
-
-
 def wiki_api_url(lang: str) -> str:
     return f"https://{lang}.wikipedia.org{API_PATH}"
 
 
 def _retry_after_seconds(response: requests.Response, attempt: int) -> float:
-    """Seconds to sleep after a 429, preferring the Retry-After header."""
     raw = (response.headers.get("Retry-After") or "").strip()
     if raw:
         try:
-            # Integer / float seconds (the common Wikimedia form).
             return min(max(float(raw), 0.0), MAX_RETRY_AFTER_SECONDS)
         except ValueError:
             pass
         try:
-            # HTTP-date form.
             from email.utils import parsedate_to_datetime
 
             when = parsedate_to_datetime(raw)
@@ -219,7 +205,6 @@ def _retry_after_seconds(response: requests.Response, attempt: int) -> float:
             return min(max(delay, 0.0), MAX_RETRY_AFTER_SECONDS)
         except (TypeError, ValueError, OSError, OverflowError):
             pass
-    # No usable header: exponential backoff, capped.
     return min(2.0**attempt, MAX_RETRY_AFTER_SECONDS)
 
 
@@ -228,7 +213,6 @@ def _get_with_rate_limit(
     api_url: str,
     params: dict,
 ) -> requests.Response:
-    """GET that honors 429 Retry-After before giving up."""
     last_response: requests.Response | None = None
     for attempt in range(1, MAX_RATE_LIMIT_RETRIES + 1):
         response = session.get(api_url, params=params, timeout=60)
@@ -248,16 +232,23 @@ def _get_with_rate_limit(
     return last_response
 
 
+def wikipedia_article_url(lang: str, title: str) -> str:
+    """Build a Wikipedia article URL for ``title`` on ``lang`` wiki."""
+    return f"https://{lang}.wikipedia.org/wiki/" + quote(
+        title.replace(" ", "_"),
+        safe="",
+    )
+
+
 def fetch_wikitext(
     session: requests.Session,
     api_url: str,
     title: str,
-) -> str | None:
-    """Return raw wikitext for ``title``, or ``None`` if the page is missing.
+) -> tuple[str, str] | None:
+    """Return ``(wikitext, resolved_title)``, or ``None`` if the page is missing.
 
-    Follows redirects so a species synonym title still yields the target
-    article source. Raises ``requests.HTTPError`` on transport/HTTP failures
-    (including a 429 that still fails after retries).
+    With ``redirects=1``, ``resolved_title`` is the canonical page title after
+    any redirect from the queried ``title``.
     """
     params = {
         "action": "query",
@@ -286,79 +277,206 @@ def fetch_wikitext(
     main = slots.get("main") or {}
     content = main.get("content")
     if content is None:
-        # Older API shape without slots.
         content = revisions[0].get("content")
     if content is None:
         return None
-    return content
+    resolved = (page.get("title") or title or "").strip()
+    return content, resolved or title
 
 
 def already_done(tax_dir: Path, wiki_path: Path) -> bool:
-    """True when a previous run already recorded a hit or a miss for this tax."""
     if wiki_path.is_file():
         return True
-    # Empty folder = previous miss marker.
     return tax_dir.is_dir() and not any(tax_dir.iterdir())
+
+
+def _load_json(path: Path) -> dict | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_wiki_list_by_id(data_dir: Path) -> dict[str, dict[str, str]]:
+    """Load existing ``wiki_list.json`` found rows keyed by iNat tax id."""
+    payload = _load_json(data_dir / WIKI_LIST_NAME) or {}
+    found = payload.get("found")
+    if not isinstance(found, list):
+        return {}
+    by_id: dict[str, dict[str, str]] = {}
+    for row in found:
+        if not isinstance(row, dict):
+            continue
+        tid = str(row.get("id") or "").strip()
+        if not tid:
+            continue
+        by_id[tid] = {
+            "id": tid,
+            "queried": str(row.get("queried") or "").strip(),
+            "title": str(row.get("title") or "").strip(),
+            "url": str(row.get("url") or "").strip(),
+        }
+    return by_id
+
+
+def write_wiki_list(data_dir: Path, by_id: dict[str, dict[str, str]]) -> Path:
+    """Write ``wiki_list.json`` with found ``{id, queried, title, url}`` rows."""
+
+    def sort_key(row: dict[str, str]):
+        tid = row.get("id") or ""
+        return (0, int(tid)) if tid.isdigit() else (1, tid)
+
+    found = sorted(by_id.values(), key=sort_key)
+    out = data_dir / WIKI_LIST_NAME
+    _write_json(
+        out,
+        {
+            "version": WIKI_LIST_VERSION,
+            "found": found,
+        },
+    )
+    return out
+
+
+def load_found_taxa(data_dir: Path) -> list[tuple[str, str, list[str]]]:
+    """Return ``[(tax_id, current_name, synonym_names), ...]`` for found taxa."""
+    summary = _load_json(data_dir / INATS_SUMMARY_NAME)
+    if not summary:
+        return []
+    by_tax = summary.get("by_tax_id")
+    if not isinstance(by_tax, dict):
+        return []
+
+    syn_summary = _load_json(data_dir / INATS_SYNONYMS_SUMMARY_NAME) or {}
+    syn_by_tax = syn_summary.get("by_tax_id")
+    if not isinstance(syn_by_tax, dict):
+        syn_by_tax = {}
+
+    rows: list[tuple[str, str, list[str]]] = []
+    for tax_id, entry in by_tax.items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("found") is False:
+            continue
+        current = (entry.get("name") or "").strip()
+        syn_entry = syn_by_tax.get(str(tax_id))
+        synonyms: list[str] = []
+        if isinstance(syn_entry, dict):
+            if not current:
+                current = (syn_entry.get("current_name") or "").strip()
+            for name in syn_entry.get("synonyms") or []:
+                name = (name or "").strip()
+                if name and name.casefold() != current.casefold():
+                    synonyms.append(name)
+        rows.append((str(tax_id), current, synonyms))
+
+    def sort_key(item: tuple[str, str, list[str]]):
+        tid = item[0]
+        return (0, int(tid)) if tid.isdigit() else (1, tid)
+
+    rows.sort(key=sort_key)
+    return rows
+
+
+def title_candidates(current_name: str, synonyms: list[str]) -> list[str]:
+    """Ordered unique titles: current name first, then synonyms."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for title in [current_name, *synonyms]:
+        title = (title or "").strip()
+        if not title:
+            continue
+        key = title.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(title)
+    return out
 
 
 def harvest_one(
     session: requests.Session,
     api_url: str,
+    lang: str,
     data_dir: Path,
     tax_id: str,
-    species: str,
+    titles: list[str],
     *,
-    force: bool,
-) -> str:
-    """Fetch one taxon. Returns a short status word: wrote / missing / skip / error."""
+    force_rerun: bool,
+) -> tuple[str, dict[str, str] | None]:
+    """Fetch one taxon. Returns ``(status, list_row_or_none)``."""
     tax_dir = data_dir / tax_id
     wiki_path = tax_dir / f"{tax_id}.wiki"
 
-    if not force and already_done(tax_dir, wiki_path):
-        return "skip"
+    if not force_rerun and already_done(tax_dir, wiki_path):
+        return "skip", None
 
-    if not species:
+    if not titles:
         tax_dir.mkdir(parents=True, exist_ok=True)
         if wiki_path.exists():
             wiki_path.unlink()
-        return "missing"
+        return "missing", None
 
-    try:
-        wikitext = fetch_wikitext(session, api_url, species)
-    except (requests.RequestException, ValueError) as exc:
-        print(f"  ERROR {tax_id} ({species}): {exc}", file=sys.stderr)
-        return "error"
+    last_error: Exception | None = None
+    errors = 0
+    for queried in titles:
+        try:
+            fetched = fetch_wikitext(session, api_url, queried)
+        except (requests.RequestException, ValueError) as exc:
+            last_error = exc
+            errors += 1
+            continue
+        if fetched is None:
+            continue
+        wikitext, resolved_title = fetched
+        tax_dir.mkdir(parents=True, exist_ok=True)
+        wiki_path.write_text(wikitext, encoding="utf-8")
+        row = {
+            "id": str(tax_id),
+            "queried": queried,
+            "title": resolved_title,
+            "url": wikipedia_article_url(lang, resolved_title),
+        }
+        return "wrote", row
 
     tax_dir.mkdir(parents=True, exist_ok=True)
-    if wikitext is None:
-        if wiki_path.exists():
-            wiki_path.unlink()
-        return "missing"
-
-    wiki_path.write_text(wikitext, encoding="utf-8")
-    return "wrote"
+    if wiki_path.exists():
+        wiki_path.unlink()
+    if titles and errors == len(titles):
+        print(f"  ERROR {tax_id}: {last_error}", file=sys.stderr)
+        return "error", None
+    return "missing", None
 
 
 def main() -> int:
     args = parse_args()
-    settings, load_names = bootstrap_django()
+    settings = bootstrap_django()
     data_dir = Path(settings.MOTHS_DATA_DIR)
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    names = load_names()
-    if not names:
-        print("Names CSV is empty or unreadable.", file=sys.stderr)
+    taxa = load_found_taxa(data_dir)
+    if not taxa:
+        print(
+            f"No found taxa in {data_dir / INATS_SUMMARY_NAME}. "
+            "Run prepare_inats.py first.",
+            file=sys.stderr,
+        )
         return 1
 
     api_url = wiki_api_url(args.lang)
     session = requests.Session()
     session.headers["User-Agent"] = USER_AGENT
 
-    # Stable order: numeric tax_id when possible, else lexical.
-    def sort_key(tax_id: str):
-        return (0, int(tax_id)) if tax_id.isdigit() else (1, tax_id)
-
-    tax_ids = sorted(names.keys(), key=sort_key)
+    wiki_by_id = load_wiki_list_by_id(data_dir)
 
     watcher = SpaceStopWatcher()
     watcher.start()
@@ -369,32 +487,40 @@ def main() -> int:
     processed = 0
 
     try:
-        for tax_id in tax_ids:
+        for tax_id, current_name, synonyms in taxa:
             if watcher.requested:
                 print("\nClean stop requested; not starting further taxa.")
                 break
 
-            info = names[tax_id]
-            species = (info.get("species") or "").strip()
-            label = species or "(empty species)"
-            status = harvest_one(
+            titles = title_candidates(current_name, synonyms)
+            label = current_name or "(no name)"
+            status, row = harvest_one(
                 session,
                 api_url,
+                args.lang,
                 data_dir,
                 tax_id,
-                species,
-                force=args.force,
+                titles,
+                force_rerun=args.force_rerun,
             )
             counts[status] = counts.get(status, 0) + 1
 
             if status == "skip":
-                # Quiet on the common re-run path.
                 pass
-            elif status == "wrote":
-                print(f"OK      {tax_id}  {label}")
+            elif status == "wrote" and row is not None:
+                wiki_by_id[tax_id] = row
+                queried = row["queried"]
+                title = row["title"]
+                via = ""
+                if queried.casefold() != (current_name or "").casefold():
+                    via = f" via queried {queried!r}"
+                if title.casefold() != queried.casefold():
+                    via += f" → {title!r}"
+                print(f"OK      {tax_id}  {label}{via}")
                 processed += 1
             elif status == "missing":
-                print(f"MISSING {tax_id}  {label}")
+                wiki_by_id.pop(tax_id, None)
+                print(f"MISSING {tax_id}  {label}  (tried {len(titles)} titles)")
                 processed += 1
             else:
                 processed += 1
@@ -408,8 +534,12 @@ def main() -> int:
     finally:
         watcher.stop()
 
+    list_path = write_wiki_list(data_dir, wiki_by_id)
     print(
-        f"\nDone. wrote={counts['wrote']} missing={counts['missing']} "
+        f"\nWrote {list_path}: found={len(wiki_by_id)}"
+    )
+    print(
+        f"Done. wrote={counts['wrote']} missing={counts['missing']} "
         f"skip={counts['skip']} error={counts['error']} "
         f"→ {data_dir}"
     )
