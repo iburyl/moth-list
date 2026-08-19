@@ -15,9 +15,10 @@
 {$SITE_DOMAIN} {
 	encode zstd gzip
 
-	# External traffic log: real client IP (Caddy terminates TLS), method, URI,
-	# status, User-Agent, duration. ``console`` is line-oriented and readable
-	# with tail/less/grep; switch to ``format json`` if you prefer tooling (jq).
+	# External traffic log (JSON) for GoAccess / jq. On the host::
+	#
+	#   sudo apt install goaccess   # once
+	#   ./docker/goaccess-cli.sh    # interactive CLI dashboard
 	#
 	# Growth is capped by rotation (gzipped backups by default): at most
 	# ``roll_keep`` files of ``roll_size``, and nothing older than ``roll_keep_for``.
@@ -29,7 +30,7 @@
 			roll_keep_for 168h
 			roll_interval 24h
 		}
-		format console
+		format json
 	}
 
 	reverse_proxy web:8000
