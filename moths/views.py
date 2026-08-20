@@ -25,6 +25,7 @@ from .utils import (
     VIEW_POSES,
     build_pose_data,
     build_summary,
+    build_integration_groups,
     classify_pose,
     compute_normalization,
     clear_image_class,
@@ -50,6 +51,7 @@ from .utils import (
     get_tax_summary_path,
     get_tax_thumbnail,
     get_wing_stats_path,
+    integration_layout,
     scan_tax_images,
     is_image_starred,
     list_tax_ids,
@@ -61,8 +63,7 @@ from .utils import (
     load_starred,
     load_summary,
     load_tax_summary,
-    load_wiki_summary,
-    load_wiki_tax_summary,
+    load_data_tax_summary,
     mark_pose_row_stale,
     pose_data_version_ok,
     pose_row_needs_rebuild,
@@ -77,19 +78,9 @@ from .utils import (
     tax_id_for_file,
     update_summary,
     verify_pose_row,
-    boa_node_counts,
-    boa_row_from_data,
     flat_taxonomy_rows,
-    gbif_node_counts,
-    gbif_row_from_data,
-    inats_node_counts,
-    inats_row_from_data,
     load_data_summary,
     load_species_data,
-    pnw_node_counts,
-    pnw_row_from_data,
-    wiki_node_counts,
-    wiki_row_from_summary,
 )
 
 # Unified stage/pose/flag group definitions now live in moths.utils.groups (a
@@ -132,6 +123,7 @@ def flat_taxonomy(request):
         "moths/flat_taxonomy.html",
         {
             "rows": rows,
+            "integration_flat": integration_layout("flat"),
             "species_count": species_count,
             "missing": data is None,
         },
@@ -185,12 +177,9 @@ def _index_row(tax_id: str) -> dict:
         "view_cells": [_view_cell(pose) for pose in VIEW_POSES],
         "no_stage": counts.get("no_stage", 0) if has_summary else None,
         "no_box": counts.get("no_box", 0) if has_summary else None,
-        # Wiki / BOA / iNats / GBIF / PNW decoration from MOTHS_DATA_DIR.
-        "wiki": wiki_row_from_summary(load_wiki_summary(tax_id), tax_id),
-        "boa": boa_row_from_data(species_data.get("boa")),
-        "inats": inats_row_from_data(species_data.get("inats")),
-        "gbif": gbif_row_from_data(species_data.get("gbif")),
-        "pnw": pnw_row_from_data(species_data.get("pnw")),
+        "integrations": build_integration_groups(
+            "species-list", species_data, context={"tax_id": tax_id}
+        ),
     }
 
 
@@ -214,6 +203,7 @@ def _legacy_index(request):
     context = {
         "rows": rows,
         "stages": STAGES,
+        "integration_species_list": integration_layout("species-list"),
         "total": len(rows),
         "image_dir": str(get_image_dir()),
     }
@@ -269,8 +259,8 @@ _BROWSE_COUNT_KEYS = (
 
 # Fields copied onto each taxon browse row for the table columns: next-level
 # total (want), species present-vs-expected (folders of want), the total image
-# count under the node, and the hand-label gaps. iNat observation totals come
-# from ``data/tax_summary.json`` (see :func:`inats_node_counts`), not labels.
+# count under the node, and the hand-label gaps. External source columns come
+# from ``data/tax_summary.json`` through the integration schema, not labels.
 _BROWSE_ROW_KEYS = (
     "want",
     "species_want",
@@ -293,7 +283,7 @@ def browse(request, lineage=""):
     browse page for a single species).
     """
     data = load_tax_summary()
-    wiki_tree = load_wiki_tax_summary()
+    integration_tree = load_data_tax_summary()
     segs = [s for s in lineage.split("/") if s]
     keys = [_browse_seg_to_key(s, i) for i, s in enumerate(segs)]
 
@@ -308,33 +298,37 @@ def browse(request, lineage=""):
     # Descend the tree by key: the root's children live under "superfamilies",
     # every deeper node's under "children".
     node = data
-    wiki_node = wiki_tree
+    integration_node = integration_tree
     for key in keys:
         container = node["superfamilies"] if node is data else node["children"]
         child = container.get(key)
         if child is None:
             return render(request, "moths/browse.html", {"unknown": True, "lineage": lineage})
         node = child
-        # Wiki coverage is optional; keep descending when the labels path exists.
-        if wiki_node is not None:
-            wiki_container = (
-                wiki_node.get("superfamilies")
-                if wiki_node is wiki_tree
-                else wiki_node.get("children")
+        # External coverage is optional; keep descending while its tree exists.
+        if integration_node is not None:
+            integration_container = (
+                integration_node.get("superfamilies")
+                if integration_node is integration_tree
+                else integration_node.get("children")
             )
-            wiki_node = wiki_container.get(key) if isinstance(wiki_container, dict) else None
+            integration_node = (
+                integration_container.get(key)
+                if isinstance(integration_container, dict)
+                else None
+            )
 
     depth = len(keys)
     container = node["superfamilies"] if node is data else node["children"]
-    wiki_container = None
-    if wiki_node is not None:
-        wiki_container = (
-            wiki_node.get("superfamilies")
-            if wiki_node is wiki_tree
-            else wiki_node.get("children")
+    integration_container = None
+    if integration_node is not None:
+        integration_container = (
+            integration_node.get("superfamilies")
+            if integration_node is integration_tree
+            else integration_node.get("children")
         )
-        if not isinstance(wiki_container, dict):
-            wiki_container = None
+        if not isinstance(integration_container, dict):
+            integration_container = None
 
     # Collapse the subfamily level when a family isn't subdivided: if the only
     # subfamily is the "not subdivided" bucket ("-"), list its genera directly
@@ -343,12 +337,12 @@ def browse(request, lineage=""):
     url_prefix = list(segs)
     if depth == 2 and set(container) == {_NO_SUBFAMILY}:
         container = container[_NO_SUBFAMILY]["children"]
-        if wiki_container and _NO_SUBFAMILY in wiki_container:
-            wiki_container = wiki_container[_NO_SUBFAMILY].get("children")
-            if not isinstance(wiki_container, dict):
-                wiki_container = None
+        if integration_container and _NO_SUBFAMILY in integration_container:
+            integration_container = integration_container[_NO_SUBFAMILY].get("children")
+            if not isinstance(integration_container, dict):
+                integration_container = None
         else:
-            wiki_container = None
+            integration_container = None
         url_prefix = segs + [_browse_key_to_seg(_NO_SUBFAMILY)]
         depth = 3
 
@@ -372,12 +366,17 @@ def browse(request, lineage=""):
                 "thumbnail": _browse_thumb_filename(child.get("thumbnail")),
             }
             row.update({ck: child.get(ck, 0) for ck in _BROWSE_ROW_KEYS})
-            wiki_child = wiki_container.get(key) if wiki_container else None
-            row["wiki"] = wiki_node_counts(wiki_child)
-            row["boa"] = boa_node_counts(wiki_child)
-            row["obs"] = inats_node_counts(wiki_child)["observations"]
-            row["gbif"] = gbif_node_counts(wiki_child)
-            row["pnw"] = pnw_node_counts(wiki_child)
+            integration_child = (
+                integration_container.get(key) if integration_container else None
+            )
+            source_rollups = (
+                integration_child.get("sources")
+                if isinstance(integration_child, dict)
+                else None
+            )
+            row["integrations"] = build_integration_groups(
+                "browse", source_rollups
+            )
             children.append(row)
 
     crumbs = [{"label": "All", "url": reverse("moths:browse")}]
@@ -418,6 +417,8 @@ def browse(request, lineage=""):
         "crumbs": crumbs,
         "children": children,
         "index_rows": index_rows,
+        "integration_browse": integration_layout("browse"),
+        "integration_species_list": integration_layout("species-list"),
         "stages": STAGES,
         "child_level": child_level,
         "child_level_plural": BROWSE_LEVELS_PLURAL[child_level],
@@ -932,11 +933,9 @@ def species_view(request, tax_id):
         "filter_desc": _filter_desc(stage_filter, labeled_filter, pose_filter),
         "is_filtered": bool(stage_filter or labeled_filter or pose_filter),
         "filter_qs": request.GET.urlencode(),
-        "wiki": wiki_row_from_summary(load_wiki_summary(tax_id), tax_id),
-        "boa": boa_row_from_data(species_data.get("boa")),
-        "inats": inats_row_from_data(species_data.get("inats")),
-        "gbif": gbif_row_from_data(species_data.get("gbif")),
-        "pnw": pnw_row_from_data(species_data.get("pnw")),
+        "integration_sections": build_integration_groups(
+            "species", species_data, context={"tax_id": tax_id}
+        ),
     }
     return render(request, "moths/species_view.html", context)
 

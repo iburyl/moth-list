@@ -1,0 +1,346 @@
+{
+  "schema": 1,
+  "description": "Human-edited layout for external reference data. Paths are arrays relative to one species row in data_summary.json (under sources) or one tax_summary.json node's sources map. The sources prefix is implied.",
+  "browse": [
+    {
+      "id": "wiki",
+      "name": "from wiki",
+      "items": [
+        {
+          "name": "articles",
+          "kind": "count",
+          "data": ["wiki", "total"]
+        }
+      ]
+    },
+    {
+      "id": "boa",
+      "name": "from boa",
+      "items": [
+        {
+          "name": "species",
+          "kind": "count",
+          "data": ["boa", "total"]
+        }
+      ]
+    },
+    {
+      "id": "pnw",
+      "name": "from PNW",
+      "items": [
+        {
+          "name": "species",
+          "kind": "count",
+          "data": ["pnw", "total"]
+        }
+      ]
+    },
+    {
+      "id": "inats",
+      "name": "from iNats",
+      "items": [
+        {
+          "name": "obs",
+          "kind": "count",
+          "data": ["inats", "observations"]
+        }
+      ]
+    },
+    {
+      "id": "gbif",
+      "name": "from GBIF",
+      "items": [
+        {
+          "name": "species",
+          "kind": "count",
+          "data": ["gbif", "total"]
+        },
+        {
+          "name": "obs",
+          "kind": "count",
+          "data": ["gbif", "observations"]
+        }
+      ]
+    }
+  ],
+  "species-list": [
+    {
+      "id": "wiki",
+      "name": "from wiki",
+      "items": [
+        {
+          "name": "article",
+          "kind": "link",
+          "href": ["wiki", "url"],
+          "text": "link"
+        }
+      ]
+    },
+    {
+      "id": "boa",
+      "name": "from boa",
+      "items": [
+        {
+          "name": "page",
+          "kind": "link",
+          "href": ["boa", "url"],
+          "text": "link"
+        },
+        {
+          "name": "ssps",
+          "kind": "count",
+          "data": ["boa", "subspecies"],
+          "show_if": ["boa", "url"]
+        }
+      ]
+    },
+    {
+      "id": "pnw",
+      "name": "from PNW",
+      "items": [
+        {
+          "name": "page",
+          "kind": "link",
+          "href": ["pnw", "url"],
+          "text": "link"
+        }
+      ]
+    },
+    {
+      "id": "inats",
+      "name": "from iNats",
+      "items": [
+        {
+          "name": "id",
+          "kind": "link",
+          "href": ["inats", "url"],
+          "text_data": ["tax_id"]
+        },
+        {
+          "name": "obs",
+          "kind": "count",
+          "data": ["inats", "observations_count"]
+        },
+        {
+          "name": "ML",
+          "kind": "yesno",
+          "data": ["inats", "vision"]
+        }
+      ]
+    },
+    {
+      "id": "gbif",
+      "name": "from GBIF",
+      "items": [
+        {
+          "name": "id",
+          "kind": "link",
+          "href": ["gbif", "url"],
+          "text_data": ["gbif", "usageKey"]
+        },
+        {
+          "name": "obs",
+          "kind": "count",
+          "data": ["gbif", "observations_count"]
+        }
+      ]
+    }
+  ],
+  "species": [
+    {
+      "id": "inats",
+      "name": "From iNaturalist",
+      "items": [
+        {
+          "name": "link",
+          "kind": "link",
+          "href": ["inats", "url"],
+          "text": "link"
+        },
+        {
+          "name": "taxon id",
+          "kind": "text",
+          "data": ["tax_id"]
+        },
+        {
+          "name": "common name",
+          "kind": "text",
+          "data": ["inats", "preferred_common_name"]
+        },
+        {
+          "name": "observations worldwide",
+          "kind": "count",
+          "data": ["inats", "observations_count"]
+        },
+        {
+          "name": "ML model",
+          "kind": "yesno",
+          "data": ["inats", "vision"]
+        }
+      ]
+    },
+    {
+      "id": "wiki",
+      "name": "From Wikipedia",
+      "items": [
+        {
+          "name": "article",
+          "kind": "link",
+          "href": ["wiki", "url"],
+          "text": "link"
+        },
+        {
+          "name": "shown as",
+          "kind": "text",
+          "data": ["wiki", "scientific_name"],
+          "show_when": {
+            "data": ["wiki", "name_matches_inats"],
+            "equals": false
+          }
+        },
+        {
+          "name": "iucn",
+          "kind": "link",
+          "href": ["wiki", "iucn", "url"],
+          "text_data": ["wiki", "iucn", "status"],
+          "show_if": ["wiki", "iucn"]
+        },
+        {
+          "name": "tnc",
+          "kind": "link",
+          "href": ["wiki", "tnc", "url"],
+          "text_data": ["wiki", "tnc", "status"],
+          "show_if": ["wiki", "tnc"]
+        }
+      ]
+    },
+    {
+      "id": "boa",
+      "name": "From BoA",
+      "show_if": ["boa", "url"],
+      "items": [
+        {
+          "name": "link",
+          "kind": "link",
+          "href": ["boa", "url"],
+          "text": "link"
+        },
+        {
+          "name": "subspecies",
+          "kind": "count",
+          "data": ["boa", "subspecies"]
+        }
+      ]
+    },
+    {
+      "id": "pnw",
+      "name": "From PNW Moths",
+      "show_if": ["pnw", "url"],
+      "items": [
+        {
+          "name": "page",
+          "kind": "link",
+          "href": ["pnw", "url"],
+          "text": "link"
+        },
+        {
+          "name": "name",
+          "kind": "text",
+          "data": ["pnw", "name"]
+        },
+        {
+          "name": "common name",
+          "kind": "text",
+          "data": ["pnw", "common_name"]
+        }
+      ]
+    },
+    {
+      "id": "gbif",
+      "name": "From GBIF",
+      "items": [
+        {
+          "name": "id",
+          "kind": "link",
+          "href": ["gbif", "url"],
+          "text_data": ["gbif", "usageKey"]
+        },
+        {
+          "name": "name",
+          "kind": "text",
+          "data": ["gbif", "canonicalName"]
+        },
+        {
+          "name": "authority",
+          "kind": "text",
+          "data": ["gbif", "authorship"]
+        },
+        {
+          "name": "status",
+          "kind": "text",
+          "data": ["gbif", "status"]
+        },
+        {
+          "name": "accepted name",
+          "kind": "text",
+          "data": ["gbif", "acceptedCanonicalName"],
+          "show_when": {
+            "data": ["gbif", "status"],
+            "equals": "SYNONYM"
+          }
+        },
+        {
+          "name": "accepted authority",
+          "kind": "text",
+          "data": ["gbif", "acceptedAuthorship"],
+          "show_when": {
+            "data": ["gbif", "status"],
+            "equals": "SYNONYM"
+          }
+        },
+        {
+          "name": "last observation",
+          "kind": "text",
+          "data": ["gbif", "last_observation_date"]
+        }
+      ]
+    }
+  ],
+  "flat": [
+    {
+      "id": "inats",
+      "name": "from iNats",
+      "kind": "name_compare",
+      "data": ["inats", "name"],
+      "href": ["inats", "url"]
+    },
+    {
+      "id": "wiki",
+      "name": "from wiki",
+      "kind": "name_compare",
+      "data": ["wiki", "scientific_name"],
+      "href": ["wiki", "url"]
+    },
+    {
+      "id": "boa",
+      "name": "from boa",
+      "kind": "name_compare",
+      "data": ["boa", "name"],
+      "href": ["boa", "url"]
+    },
+    {
+      "id": "pnw",
+      "name": "from PNW",
+      "kind": "name_compare",
+      "data": ["pnw", "name"],
+      "href": ["pnw", "url"]
+    },
+    {
+      "id": "gbif",
+      "name": "from GBIF",
+      "kind": "name_compare",
+      "data": ["gbif", "displayCanonicalName"],
+      "href": ["gbif", "url"]
+    }
+  ]
+}

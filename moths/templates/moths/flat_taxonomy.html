@@ -48,18 +48,16 @@
         <thead>
             <tr>
                 <th title="Species in this list (opens species view)">species</th>
-                <th class="col-group" title="iNaturalist scientific name">from iNats</th>
-                <th class="col-group" title="Wikipedia scientific name">from wiki</th>
-                <th class="col-group" title="Butterflies of America scientific name">from boa</th>
-                <th class="col-group" title="Pacific Northwest Moths scientific name">from PNW</th>
-                <th class="col-group" title="GBIF accepted scientific name">from GBIF</th>
+                {% for group in integration_flat %}
+                <th class="col-group">{{ group.name }}</th>
+                {% endfor %}
             </tr>
         </thead>
         <tbody>
             {% for row in rows %}
                 {% if row.kind == "header" %}
                     <tr class="rank-header">
-                        <td colspan="6">{{ row.label }}</td>
+                        <td colspan="{{ integration_flat|length|add:1 }}">{{ row.label }}</td>
                     </tr>
                 {% else %}
                     <tr class="species">
@@ -70,81 +68,11 @@
                                 <a href="{% url 'moths:species_view' row.tax_id %}">{{ row.tax_id }}</a>
                             {% endif %}
                         </td>
-                        <td class="col-group">
-                            {% if row.inats.kind == "unknown" %}
-                                <span class="unknown">—</span>
-                            {% elif row.inats.kind == "same" %}
-                                {% if row.inats.url %}
-                                    <a class="same" href="{{ row.inats.url }}" target="_blank" rel="noopener" title="{{ row.inats.tooltip }}">same</a>
-                                {% else %}
-                                    <span class="same">same</span>
-                                {% endif %}
-                            {% elif row.inats.url %}
-                                <a href="{{ row.inats.url }}" target="_blank" rel="noopener" title="{{ row.inats.tooltip }}">{{ row.inats.text }}</a>
-                            {% else %}
-                                {{ row.inats.text }}
-                            {% endif %}
-                        </td>
-                        <td class="col-group">
-                            {% if row.wiki.kind == "unknown" %}
-                                <span class="unknown">—</span>
-                            {% elif row.wiki.kind == "same" %}
-                                {% if row.wiki.url %}
-                                    <a class="same" href="{{ row.wiki.url }}" target="_blank" rel="noopener" title="{{ row.wiki.tooltip }}">same</a>
-                                {% else %}
-                                    <span class="same">same</span>
-                                {% endif %}
-                            {% elif row.wiki.url %}
-                                <a href="{{ row.wiki.url }}" target="_blank" rel="noopener" title="{{ row.wiki.tooltip }}">{{ row.wiki.text }}</a>
-                            {% else %}
-                                {{ row.wiki.text }}
-                            {% endif %}
-                        </td>
-                        <td class="col-group">
-                            {% if row.boa.kind == "unknown" %}
-                                <span class="unknown">—</span>
-                            {% elif row.boa.kind == "same" %}
-                                {% if row.boa.url %}
-                                    <a class="same" href="{{ row.boa.url }}" target="_blank" rel="noopener" title="{{ row.boa.tooltip }}">same</a>
-                                {% else %}
-                                    <span class="same">same</span>
-                                {% endif %}
-                            {% elif row.boa.url %}
-                                <a href="{{ row.boa.url }}" target="_blank" rel="noopener" title="{{ row.boa.tooltip }}">{{ row.boa.text }}</a>
-                            {% else %}
-                                {{ row.boa.text }}
-                            {% endif %}
-                        </td>
-                        <td class="col-group">
-                            {% if row.pnw.kind == "unknown" %}
-                                <span class="unknown">—</span>
-                            {% elif row.pnw.kind == "same" %}
-                                {% if row.pnw.url %}
-                                    <a class="same" href="{{ row.pnw.url }}" target="_blank" rel="noopener" title="{{ row.pnw.tooltip }}">same</a>
-                                {% else %}
-                                    <span class="same">same</span>
-                                {% endif %}
-                            {% elif row.pnw.url %}
-                                <a href="{{ row.pnw.url }}" target="_blank" rel="noopener" title="{{ row.pnw.tooltip }}">{{ row.pnw.text }}</a>
-                            {% else %}
-                                {{ row.pnw.text }}
-                            {% endif %}
-                        </td>
-                        <td class="col-group">
-                            {% if row.gbif.kind == "unknown" %}
-                                <span class="unknown">—</span>
-                            {% elif row.gbif.kind == "same" %}
-                                {% if row.gbif.url %}
-                                    <a class="same" href="{{ row.gbif.url }}" target="_blank" rel="noopener" title="{{ row.gbif.tooltip }}">same</a>
-                                {% else %}
-                                    <span class="same">same</span>
-                                {% endif %}
-                            {% elif row.gbif.url %}
-                                <a href="{{ row.gbif.url }}" target="_blank" rel="noopener" title="{{ row.gbif.tooltip }}">{{ row.gbif.text }}</a>
-                            {% else %}
-                                {{ row.gbif.text }}
-                            {% endif %}
-                        </td>
+                        {% for group in row.integrations %}
+                            {% for cell in group.items %}
+                            <td class="col-group">{% include "moths/_integration_cell.html" with cell=cell %}</td>
+                            {% endfor %}
+                        {% endfor %}
                     </tr>
                 {% endif %}
             {% endfor %}

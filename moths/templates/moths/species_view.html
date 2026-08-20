@@ -167,158 +167,17 @@
     </div>
 
     <aside class="side-panel">
-        <h3>From iNaturalist</h3>
+        {% for section in integration_sections %}
+        <h3>{{ section.name }}</h3>
         <ul class="meta-list">
+            {% for cell in section.items %}
             <li>
-                <span>link</span>
-                <span><a href="https://www.inaturalist.org/taxa/{{ tax_id }}" target="_blank" rel="noopener">link &#8599;</a></span>
+                <span>{{ cell.name }}</span>
+                <span>{% include "moths/_integration_cell.html" with cell=cell external_arrow=True %}</span>
             </li>
-            <li><span>taxon id</span><span>{{ tax_id }}</span></li>
-            <li>
-                <span>common name</span>
-                <span>{% if inats.preferred_common_name %}{{ inats.preferred_common_name }}{% else %}<span class="muted">—</span>{% endif %}</span>
-            </li>
-            <li>
-                <span>observations worldwide</span>
-                <span>{% if inats.has_taxon %}{{ inats.observations_count }}{% else %}<span class="muted">—</span>{% endif %}</span>
-            </li>
-            <li>
-                <span>ML model</span>
-                <span>
-                    {% if inats.vision %}
-                        yes
-                    {% else %}
-                        <span class="flag-no">no</span>
-                    {% endif %}
-                </span>
-            </li>
+            {% endfor %}
         </ul>
-
-        <h3>From Wikipedia</h3>
-        <ul class="meta-list">
-            <li>
-                <span>article</span>
-                <span>
-                    {% if wiki.article_url %}
-                        <a href="{{ wiki.article_url }}" target="_blank" rel="noopener" title="{{ wiki.scientific_name }}">link &#8599;</a>
-                    {% else %}
-                        no article
-                    {% endif %}
-                </span>
-            </li>
-            {% if wiki.have_wiki and wiki.name_matches_inats == False and wiki.scientific_name %}
-            <li>
-                <span>shown as</span>
-                <span>{{ wiki.scientific_name }}</span>
-            </li>
-            {% endif %}
-            {% if wiki.has_iucn %}
-            <li>
-                <span>iucn</span>
-                <span>
-                    {% if wiki.iucn_url %}
-                        <a href="{{ wiki.iucn_url }}" target="_blank" rel="noopener">{{ wiki.iucn_status }} &#8599;</a>
-                    {% else %}
-                        {{ wiki.iucn_status }}
-                    {% endif %}
-                </span>
-            </li>
-            {% endif %}
-            {% if wiki.has_tnc %}
-            <li>
-                <span>tnc</span>
-                <span>
-                    {% if wiki.tnc_url %}
-                        <a href="{{ wiki.tnc_url }}" target="_blank" rel="noopener">{{ wiki.tnc_status }} &#8599;</a>
-                    {% else %}
-                        {{ wiki.tnc_status }}
-                    {% endif %}
-                </span>
-            </li>
-            {% endif %}
-        </ul>
-
-        {% if boa.has_page %}
-        <h3>From BoA</h3>
-        <ul class="meta-list">
-            <li>
-                <span>link</span>
-                <span><a href="{{ boa.url }}" target="_blank" rel="noopener"{% if boa.location %} title="{{ boa.location }}"{% endif %}>link &#8599;</a></span>
-            </li>
-            <li>
-                <span>subspecies</span>
-                <span>{% if boa.subspecies %}{{ boa.subspecies }}{% else %}—{% endif %}</span>
-            </li>
-        </ul>
-        {% endif %}
-
-        {% if pnw.has_page %}
-        <h3>From PNW Moths</h3>
-        <ul class="meta-list">
-            <li>
-                <span>page</span>
-                <span><a href="{{ pnw.url }}" target="_blank" rel="noopener">link &#8599;</a></span>
-            </li>
-            <li>
-                <span>name</span>
-                <span>{% if pnw.name %}{{ pnw.name }}{% else %}<span class="muted">—</span>{% endif %}</span>
-            </li>
-            <li>
-                <span>common name</span>
-                <span>{% if pnw.common_name %}{{ pnw.common_name }}{% else %}<span class="muted">—</span>{% endif %}</span>
-            </li>
-        </ul>
-        {% endif %}
-
-        <h3>From GBIF</h3>
-        <ul class="meta-list">
-            <li>
-                <span>id</span>
-                <span>
-                    {% if gbif.has_taxon and gbif.url %}
-                        <a href="{{ gbif.url }}" target="_blank" rel="noopener">{{ gbif.usageKey }} &#8599;</a>
-                    {% else %}
-                        no taxon
-                    {% endif %}
-                </span>
-            </li>
-            {% if gbif.has_taxon %}
-            <li>
-                <span>name</span>
-                <span>
-                    {% if gbif.canonicalName %}
-                        {{ gbif.canonicalName }}{% if gbif.authorship %}<br>{{ gbif.authorship }}{% endif %}
-                    {% elif gbif.scientificName %}
-                        {{ gbif.scientificName }}
-                    {% else %}
-                        <span class="muted">—</span>
-                    {% endif %}
-                </span>
-            </li>
-            <li>
-                <span>status</span>
-                <span>{% if gbif.status %}{{ gbif.status|lower }}{% else %}<span class="muted">—</span>{% endif %}</span>
-            </li>
-            {% if gbif.status|lower == "synonym" %}
-            {% if gbif.acceptedCanonicalName or gbif.acceptedScientificName %}
-            <li>
-                <span>accepted name</span>
-                <span>
-                    {% if gbif.acceptedCanonicalName %}
-                        {{ gbif.acceptedCanonicalName }}{% if gbif.acceptedAuthorship %}<br>{{ gbif.acceptedAuthorship }}{% endif %}
-                    {% else %}
-                        {{ gbif.acceptedScientificName }}
-                    {% endif %}
-                </span>
-            </li>
-            {% endif %}
-            {% endif %}
-            <li>
-                <span>last observation date</span>
-                <span>{% if gbif.last_observation_date %}{{ gbif.last_observation_date }}{% else %}<span class="muted">—</span>{% endif %}</span>
-            </li>
-            {% endif %}
-        </ul>
+        {% endfor %}
 
         {% if has_images and can_edit %}
         <h3>Selection</h3>

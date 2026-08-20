@@ -92,8 +92,8 @@ def load_names() -> dict[str, dict]:
     ``name``, and ``obs`` (iNat observation count when harvested). Missing or
     stale summary → empty mapping.
     """
-    # Local import avoids a cycle at module load (wiki does not import names).
-    from .wiki import get_data_summary_path, load_data_summary
+    # Local import avoids a cycle at module load (data_sources does not import names).
+    from .data_sources import get_data_summary_path, load_data_summary
 
     path = get_data_summary_path()
     key = str(path)

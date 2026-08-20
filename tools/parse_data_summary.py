@@ -14,11 +14,11 @@ Reads:
 Writes::
 
     MOTHS_DATA_DIR/data_summary.json
-        Flat ``{ tax_id: { lineage, wiki, boa, inats, gbif, pnw } }`` for every
-        species in ``inats_summary`` (found and not_found).
+        Flat ``{ tax_id: { lineage..., sources: {wiki, boa, ...} } }`` for
+        every species in ``inats_summary`` (found and not_found).
 
     MOTHS_DATA_DIR/tax_summary.json
-        Hierarchical roll-up counts (wiki / boa / inats / gbif / pnw) for browse.
+        Hierarchical roll-up counts under each node's uniform ``sources`` map.
 """
 
 from __future__ import annotations
@@ -29,19 +29,24 @@ import os
 import re
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 DATA_SUMMARY_NAME = "data_summary.json"
 TAX_SUMMARY_NAME = "tax_summary.json"
 WIKI_SUMMARY_NAME = "wiki_summary.json"
+WIKI_LIST_NAME = "wiki_list.json"
 BOA_SUMMARY_NAME = "boa_summary.json"
 GBIF_SUMMARY_NAME = "gbif_summary.json"
 PNW_SUMMARY_NAME = "pnwmoths_summary.json"
 INATS_SUMMARY_NAME = "inats_summary.json"
 
-DATA_SUMMARY_VERSION = 9
-TAX_TREE_VERSION = 5
+# This envelope is intentionally independent of the set of source keys.
+# Adding another entry under ``sources`` is not a schema change.
+SUMMARY_SCHEMA = 1
+DATA_SUMMARY_VERSION = 10
+TAX_TREE_VERSION = 6
 
 _UNKNOWN_TAXON = "(unknown)"
 _NO_SUBFAMILY = "-"
@@ -205,6 +210,24 @@ def lookup_wiki(tax_id: str, wiki_summary: dict | None) -> dict | None:
     return entry if isinstance(entry, dict) else None
 
 
+def index_wiki_urls(wiki_list: dict | None) -> dict[str, str]:
+    """Return downloaded Wikipedia article URLs keyed by iNaturalist tax id."""
+    by_tax_id: dict[str, str] = {}
+    if not wiki_list:
+        return by_tax_id
+    rows = wiki_list.get("found")
+    if not isinstance(rows, list):
+        return by_tax_id
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        tax_id = str(row.get("id") or "").strip()
+        url = (row.get("url") or "").strip()
+        if tax_id and url:
+            by_tax_id[tax_id] = url
+    return by_tax_id
+
+
 def lookup_gbif(tax_id: str, gbif_summary: dict | None) -> dict | None:
     if not gbif_summary:
         return None
@@ -221,7 +244,7 @@ def lookup_gbif(tax_id: str, gbif_summary: dict | None) -> dict | None:
     return entry
 
 
-def _wiki_payload(entry: dict | None) -> dict | None:
+def _wiki_payload(entry: dict | None, url: str | None = None) -> dict | None:
     if entry is None:
         return None
     kind = (entry.get("article_kind") or "").strip()
@@ -235,8 +258,16 @@ def _wiki_payload(entry: dict | None) -> dict | None:
     matches = entry.get("name_matches_inats")
     if matches is not None:
         matches = bool(matches)
+    scientific_name = (entry.get("scientific_name") or "").strip()
+    article_url = (url or "").strip()
+    if not article_url and scientific_name:
+        article_url = (
+            "https://en.wikipedia.org/wiki/"
+            + quote(scientific_name.replace(" ", "_"))
+        )
     return {
-        "scientific_name": entry.get("scientific_name") or "",
+        "url": article_url or None,
+        "scientific_name": scientific_name,
         "authority": entry.get("authority") or "",
         "have_speciesbox": bool(entry.get("have_speciesbox")),
         "have_automatic_taxobox": bool(entry.get("have_automatic_taxobox")),
@@ -278,7 +309,22 @@ def _inats_payload(entry: dict | None) -> dict | None:
     ancestors = entry.get("ancestors")
     out["ancestors"] = ancestors if isinstance(ancestors, list) else []
     out["found"] = bool(entry.get("found", True))
+    tax_id = str(out.get("id") or "").strip()
+    out["url"] = f"https://www.inaturalist.org/taxa/{tax_id}" if tax_id else None
     return out
+
+
+def _split_name_authority(full: str, canonical: str, authorship: str) -> tuple[str, str]:
+    """Return ``(canonical, authorship)``, filling authorship from a full name."""
+    full = (full or "").strip()
+    canonical = (canonical or "").strip()
+    authorship = (authorship or "").strip()
+    if not authorship and full and canonical and full.startswith(canonical):
+        authorship = full[len(canonical) :].strip()
+    if not canonical and full:
+        canonical = full
+        authorship = ""
+    return canonical, authorship
 
 
 def _gbif_payload(entry: dict | None) -> dict | None:
@@ -290,6 +336,26 @@ def _gbif_payload(entry: dict | None) -> dict | None:
         out["observations_count"] = int(entry.get("observations_count") or 0)
     except (TypeError, ValueError):
         out["observations_count"] = 0
+    canonical, authorship = _split_name_authority(
+        out.get("scientificName") or "",
+        out.get("canonicalName") or "",
+        out.get("authorship") or "",
+    )
+    accepted_canonical, accepted_authorship = _split_name_authority(
+        out.get("acceptedScientificName") or "",
+        out.get("acceptedCanonicalName") or "",
+        out.get("acceptedAuthorship") or "",
+    )
+    out["canonicalName"] = canonical
+    out["authorship"] = authorship
+    out["acceptedCanonicalName"] = accepted_canonical
+    out["acceptedAuthorship"] = accepted_authorship
+    # Flat taxonomy prefers the accepted name, but an accepted match has no
+    # separate accepted-name fields. Resolve that fallback once in the parser.
+    out["displayCanonicalName"] = accepted_canonical or canonical
+    out["displayAuthorship"] = accepted_authorship or (
+        authorship if not accepted_canonical else ""
+    )
     return out
 
 
@@ -332,55 +398,112 @@ def _tax_lineage_keys(info: dict) -> tuple[str, str, str, str]:
     )
 
 
-def _wiki_counts(leaves: list[dict]) -> dict[str, int]:
+def _wiki_counts(source_rows: list[dict | None]) -> dict[str, int]:
     counts = {
-        "total": sum(1 for leaf in leaves if leaf.get("have_wiki")),
-        "with_iucn": sum(1 for leaf in leaves if leaf.get("has_iucn")),
-        "with_tnc": sum(1 for leaf in leaves if leaf.get("has_tnc")),
+        "total": sum(1 for source in source_rows if source is not None),
+        "with_iucn": sum(
+            1 for source in source_rows
+            if isinstance(source, dict) and isinstance(source.get("iucn"), dict)
+        ),
+        "with_tnc": sum(
+            1 for source in source_rows
+            if isinstance(source, dict) and isinstance(source.get("tnc"), dict)
+        ),
     }
     for key in _ARTICLE_KIND_KEYS:
-        counts[key] = sum(1 for leaf in leaves if leaf.get("article_kind") == key)
+        counts[key] = sum(
+            1
+            for source in source_rows
+            if isinstance(source, dict) and source.get("article_kind") == key
+        )
     return counts
 
 
-def _boa_counts(leaves: list[dict]) -> dict[str, int]:
-    return {"total": sum(1 for leaf in leaves if leaf.get("has_boa"))}
-
-
-def _inats_counts(leaves: list[dict]) -> dict[str, int]:
+def _boa_counts(source_rows: list[dict | None]) -> dict[str, int]:
     return {
-        "total": sum(1 for leaf in leaves if leaf.get("has_inats")),
-        "observations": sum(int(leaf.get("obs") or 0) for leaf in leaves),
+        "total": sum(
+            1 for source in source_rows
+            if isinstance(source, dict) and bool(source.get("url"))
+        )
     }
 
 
-def _gbif_counts(leaves: list[dict]) -> dict[str, int]:
+def _inats_counts(source_rows: list[dict | None]) -> dict[str, int]:
     return {
-        "total": sum(1 for leaf in leaves if leaf.get("has_gbif")),
-        "accepted": sum(1 for leaf in leaves if leaf.get("gbif_accepted")),
+        "total": sum(1 for source in source_rows if source is not None),
+        "observations": sum(
+            int((source or {}).get("observations_count") or 0)
+            for source in source_rows
+        ),
+    }
+
+
+def _gbif_counts(source_rows: list[dict | None]) -> dict[str, int]:
+    return {
+        "total": sum(1 for source in source_rows if source is not None),
+        "accepted": sum(
+            1 for source in source_rows
+            if isinstance(source, dict) and bool(source.get("accepted"))
+        ),
         "synonym": sum(
             1
-            for leaf in leaves
-            if leaf.get("has_gbif") and not leaf.get("gbif_accepted")
+            for source in source_rows
+            if source is not None and not bool((source or {}).get("accepted"))
         ),
-        "observations": sum(int(leaf.get("gbif_obs") or 0) for leaf in leaves),
+        "observations": sum(
+            int((source or {}).get("observations_count") or 0)
+            for source in source_rows
+        ),
     }
 
 
-def _pnw_counts(leaves: list[dict]) -> dict[str, int]:
-    return {"total": sum(1 for leaf in leaves if leaf.get("has_pnw"))}
+def _pnw_counts(source_rows: list[dict | None]) -> dict[str, int]:
+    return {
+        "total": sum(
+            1 for source in source_rows
+            if isinstance(source, dict) and bool(source.get("url"))
+        )
+    }
+
+
+def _species_rollups(sources: dict) -> dict[str, dict[str, int]]:
+    """Convert one data-summary source map to tax-summary count objects."""
+    def source(source_id: str) -> dict | None:
+        value = sources.get(source_id)
+        return value if isinstance(value, dict) else None
+
+    return {
+        "wiki": _wiki_counts([source("wiki")]),
+        "boa": _boa_counts([source("boa")]),
+        "inats": _inats_counts([source("inats")]),
+        "gbif": _gbif_counts([source("gbif")]),
+        "pnw": _pnw_counts([source("pnw")]),
+    }
+
+
+def _rollup_sources(leaves: list[dict]) -> dict[str, dict[str, int]]:
+    """Sum species count objects into the uniform roll-up for a parent node."""
+    source_ids = ("wiki", "boa", "inats", "gbif", "pnw")
+    out: dict[str, dict[str, int]] = {source_id: {} for source_id in source_ids}
+    for leaf in leaves:
+        sources = leaf.get("sources")
+        if not isinstance(sources, dict):
+            continue
+        for source_id in source_ids:
+            counts = sources.get(source_id)
+            if not isinstance(counts, dict):
+                continue
+            target = out[source_id]
+            for key, value in counts.items():
+                if isinstance(value, (int, bool)):
+                    target[key] = target.get(key, 0) + int(value)
+    return out
 
 
 def _collect_leaves(node: dict) -> list[dict]:
     children = node.get("children")
     if not isinstance(children, dict) or not children:
-        if (
-            "have_wiki" in node
-            or "has_boa" in node
-            or "has_inats" in node
-            or "has_gbif" in node
-            or "has_pnw" in node
-        ):
+        if isinstance(node.get("sources"), dict):
             return [node]
         return []
     out: list[dict] = []
@@ -388,13 +511,7 @@ def _collect_leaves(node: dict) -> list[dict]:
         if (
             isinstance(child, dict)
             and "children" not in child
-            and (
-                "have_wiki" in child
-                or "has_boa" in child
-                or "has_inats" in child
-                or "has_gbif" in child
-                or "has_pnw" in child
-            )
+            and isinstance(child.get("sources"), dict)
         ):
             out.append(child)
         else:
@@ -407,11 +524,7 @@ def _parent_node(children: dict) -> dict:
     for child in children.values():
         leaves.extend(_collect_leaves(child))
     return {
-        **_wiki_counts(leaves),
-        "boa": _boa_counts(leaves),
-        "inats": _inats_counts(leaves),
-        "gbif": _gbif_counts(leaves),
-        "pnw": _pnw_counts(leaves),
+        "sources": _rollup_sources(leaves),
         "children": children,
     }
 
@@ -420,31 +533,12 @@ def build_tax_tree(names: dict[str, dict], data_species: dict[str, dict]) -> dic
     tree: dict = {}
     for tax_id, info in names.items():
         row = data_species.get(str(tax_id)) or {}
-        wiki = row.get("wiki") if isinstance(row.get("wiki"), dict) else None
-        boa = row.get("boa") if isinstance(row.get("boa"), dict) else None
-        inats = row.get("inats") if isinstance(row.get("inats"), dict) else None
-        gbif = row.get("gbif") if isinstance(row.get("gbif"), dict) else None
-        pnw = row.get("pnw") if isinstance(row.get("pnw"), dict) else None
+        sources = row.get("sources") if isinstance(row.get("sources"), dict) else {}
         sf, fam, subf, genus = _tax_lineage_keys(info)
-        kind = (wiki or {}).get("article_kind") if wiki else None
         leaf = {
             "species": info.get("species") or "",
             "name": info.get("name") or "",
-            "have_wiki": wiki is not None,
-            "have_speciesbox": bool((wiki or {}).get("have_speciesbox")),
-            "have_automatic_taxobox": bool((wiki or {}).get("have_automatic_taxobox")),
-            "name_matches_inats": (wiki or {}).get("name_matches_inats"),
-            "article_kind": kind if wiki else None,
-            "has_iucn": isinstance((wiki or {}).get("iucn"), dict),
-            "has_tnc": isinstance((wiki or {}).get("tnc"), dict),
-            "has_boa": bool(boa and boa.get("url")),
-            "boa_subspecies": int((boa or {}).get("subspecies") or 0),
-            "has_inats": inats is not None,
-            "obs": int((inats or {}).get("observations_count") or 0),
-            "has_gbif": gbif is not None,
-            "gbif_accepted": bool((gbif or {}).get("accepted")) if gbif else False,
-            "gbif_obs": int((gbif or {}).get("observations_count") or 0),
-            "has_pnw": bool(pnw and pnw.get("url")),
+            "sources": _species_rollups(sources),
         }
         (
             tree.setdefault(sf, {})
@@ -463,11 +557,7 @@ def build_tax_tree(names: dict[str, dict], data_species: dict[str, dict]) -> dic
                 for genus, species_map in genera.items():
                     leaves = list(species_map.values())
                     genus_nodes[genus] = {
-                        **_wiki_counts(leaves),
-                        "boa": _boa_counts(leaves),
-                        "inats": _inats_counts(leaves),
-                        "gbif": _gbif_counts(leaves),
-                        "pnw": _pnw_counts(leaves),
+                        "sources": _rollup_sources(leaves),
                         "children": species_map,
                     }
                 subf_nodes[subf] = _parent_node(genus_nodes)
@@ -479,12 +569,9 @@ def build_tax_tree(names: dict[str, dict], data_species: dict[str, dict]) -> dic
         root_leaves.extend(_collect_leaves(node))
 
     return {
+        "schema": SUMMARY_SCHEMA,
         "version": TAX_TREE_VERSION,
-        **_wiki_counts(root_leaves),
-        "boa": _boa_counts(root_leaves),
-        "inats": _inats_counts(root_leaves),
-        "gbif": _gbif_counts(root_leaves),
-        "pnw": _pnw_counts(root_leaves),
+        "sources": _rollup_sources(root_leaves),
         "superfamilies": superfamilies,
     }
 
@@ -532,6 +619,7 @@ def main() -> int:
         return 1
 
     wiki_summary = _load_json(data_dir / WIKI_SUMMARY_NAME)
+    wiki_list = _load_json(data_dir / WIKI_LIST_NAME)
     boa_summary = _load_json(data_dir / BOA_SUMMARY_NAME)
     gbif_summary = _load_json(data_dir / GBIF_SUMMARY_NAME)
     pnw_summary = _load_json(data_dir / PNW_SUMMARY_NAME)
@@ -545,6 +633,7 @@ def main() -> int:
         print(f"Note: {PNW_SUMMARY_NAME} missing; pnw fields will be empty.")
 
     boa_by_id, boa_by_name = index_boa(boa_summary)
+    wiki_urls = index_wiki_urls(wiki_list)
     pnw_by_name = index_pnw(pnw_summary)
     universe = iter_inats_universe(inats_summary)
     if not universe:
@@ -570,7 +659,9 @@ def main() -> int:
     for tax_id, inats_entry, fallback_name in universe:
         lineage = _lineage_from_inats(inats_entry, fallback_name)
         species_name = lineage["species"]
-        wiki = _wiki_payload(lookup_wiki(tax_id, wiki_summary))
+        wiki = _wiki_payload(
+            lookup_wiki(tax_id, wiki_summary), wiki_urls.get(str(tax_id))
+        )
         boa = _boa_payload(
             lookup_boa(tax_id, species_name, boa_by_id, boa_by_name)
         )
@@ -578,12 +669,15 @@ def main() -> int:
         gbif = _gbif_payload(lookup_gbif(tax_id, gbif_summary))
         pnw = _pnw_payload(lookup_pnw(species_name, pnw_by_name))
         data_species[str(tax_id)] = {
+            "tax_id": str(tax_id),
             **lineage,
-            "wiki": wiki,
-            "boa": boa,
-            "inats": inats,
-            "gbif": gbif,
-            "pnw": pnw,
+            "sources": {
+                "wiki": wiki,
+                "boa": boa,
+                "inats": inats,
+                "gbif": gbif,
+                "pnw": pnw,
+            },
         }
         names[str(tax_id)] = lineage
         if inats is not None:
@@ -610,6 +704,7 @@ def main() -> int:
             counts["pnw"] += 1
 
     data_payload = {
+        "schema": SUMMARY_SCHEMA,
         "version": DATA_SUMMARY_VERSION,
         "species": data_species,
     }
@@ -636,13 +731,17 @@ def main() -> int:
         f"pnw={counts['pnw']}"
     )
     print(f"Wrote {data_path}")
-    gbif_tree = tree.get("gbif") if isinstance(tree.get("gbif"), dict) else {}
-    pnw_tree = tree.get("pnw") if isinstance(tree.get("pnw"), dict) else {}
+    tree_sources = tree.get("sources") if isinstance(tree.get("sources"), dict) else {}
+    wiki_tree = tree_sources.get("wiki") if isinstance(tree_sources.get("wiki"), dict) else {}
+    boa_tree = tree_sources.get("boa") if isinstance(tree_sources.get("boa"), dict) else {}
+    inats_tree = tree_sources.get("inats") if isinstance(tree_sources.get("inats"), dict) else {}
+    gbif_tree = tree_sources.get("gbif") if isinstance(tree_sources.get("gbif"), dict) else {}
+    pnw_tree = tree_sources.get("pnw") if isinstance(tree_sources.get("pnw"), dict) else {}
     print(
-        f"Wrote {tree_path}: wiki.total={tree['total']} "
-        f"boa.total={tree['boa']['total']} "
-        f"inats.total={tree['inats']['total']} "
-        f"inats.observations={tree['inats']['observations']} "
+        f"Wrote {tree_path}: wiki.total={wiki_tree.get('total', 0)} "
+        f"boa.total={boa_tree.get('total', 0)} "
+        f"inats.total={inats_tree.get('total', 0)} "
+        f"inats.observations={inats_tree.get('observations', 0)} "
         f"gbif.total={gbif_tree.get('total', 0)} "
         f"gbif.observations={gbif_tree.get('observations', 0)} "
         f"pnw.total={pnw_tree.get('total', 0)}"

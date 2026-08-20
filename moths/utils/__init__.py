@@ -231,27 +231,18 @@ from .summary import (
     soft_update_tax_summary,
     update_summary,
 )
-from .wiki import (
-    boa_node_counts,
-    boa_row_from_data,
-    descend_wiki_node,
+from .data_sources import (
     flat_taxonomy_rows,
-    gbif_node_counts,
-    gbif_row_from_data,
     get_data_dir,
     get_data_summary_path,
-    get_wiki_article_path,
-    get_wiki_summary_path,
-    get_wiki_tax_summary_path,
-    inats_node_counts,
-    inats_row_from_data,
+    get_data_tax_summary_path,
     load_data_summary,
+    load_data_tax_summary,
     load_species_data,
-    load_wiki_summary,
-    load_wiki_tax_summary,
-    pnw_node_counts,
-    pnw_row_from_data,
-    wiki_node_counts,
-    wiki_row_from_summary,
-    wikipedia_url,
+)
+from .integration import (
+    build_integration_groups,
+    get_integration_path,
+    integration_layout,
+    load_integration,
 )

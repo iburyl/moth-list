@@ -1,0 +1,27 @@
+{% if cell.kind == "link" %}
+    {% if cell.href %}
+        <a href="{{ cell.href }}" target="_blank" rel="noopener">{{ cell.text }}{% if external_arrow %} &#8599;{% endif %}</a>
+    {% elif not cell.missing %}
+        {{ cell.text }}
+    {% else %}
+        <span class="zero muted">—</span>
+    {% endif %}
+{% elif cell.kind == "yesno" %}
+    {% if cell.value %}yes{% else %}<span class="flag-no">no</span>{% endif %}
+{% elif cell.kind == "name_compare" %}
+    {% if cell.missing %}
+        <span class="unknown zero muted">—</span>
+    {% elif cell.same %}
+        {% if cell.href %}<a class="same" href="{{ cell.href }}" target="_blank" rel="noopener">same</a>{% else %}<span class="same">same</span>{% endif %}
+    {% elif cell.href %}
+        <a href="{{ cell.href }}" target="_blank" rel="noopener">{{ cell.text }}</a>
+    {% else %}
+        {{ cell.text }}
+    {% endif %}
+{% elif cell.missing %}
+    <span class="zero muted">—</span>
+{% elif cell.kind == "count" and cell.value == 0 %}
+    <span class="zero num-zero">0</span>
+{% else %}
+    {{ cell.text }}
+{% endif %}
